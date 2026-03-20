@@ -1,27 +1,38 @@
 @echo off
-setlocal enableextensions enabledelayedexpansion
+setlocal enableextensions
 echo ============================================
 echo  GR7 Backup Manager - Build EXE
 echo ============================================
 echo.
 
+set "MODE=%~1"
+if "%MODE%"=="" set "MODE=win11"
+
+if /I "%MODE%"=="win7" goto :WIN7
+goto :WIN11
+
+:WIN11
+echo [1/5] Preparando ambiente para Windows 10/11 (Python atual)...
+set "VENV_DIR=.venv-build"
+set "PY=python"
+where py >nul 2>&1
+if not errorlevel 1 set "PY=py -3"
+goto :SETUP
+
+:WIN7
 echo [1/5] Preparando ambiente para Windows 7 (Python 3.8)...
 set "VENV_DIR=.venv-win7"
 set "PY="
 
 where py >nul 2>&1
-if %errorlevel%==0 (
+if not errorlevel 1 (
   py -3.8 -c "import sys; raise SystemExit(0 if sys.version_info[:2]==(3,8) else 1)" >nul 2>&1
-  if %errorlevel%==0 (
-    set "PY=py -3.8"
-  )
+  if not errorlevel 1 set "PY=py -3.8"
 )
 
 if "%PY%"=="" (
   python -c "import sys; raise SystemExit(0 if sys.version_info[:2]==(3,8) else 1)" >nul 2>&1
-  if %errorlevel%==0 (
-    set "PY=python"
-  )
+  if not errorlevel 1 set "PY=python"
 )
 
 if "%PY%"=="" (
@@ -29,9 +40,13 @@ if "%PY%"=="" (
   echo Instale o Python 3.8 (x64) e tente novamente.
   echo Dica: se tiver o Python Launcher, o comando deve funcionar: py -3.8
   echo.
+  if "%NO_PAUSE%"=="1" exit /b 1
   pause
   exit /b 1
 )
+goto :SETUP
+
+:SETUP
 
 if not exist "%VENV_DIR%\Scripts\python.exe" (
   %PY% -m venv "%VENV_DIR%"
@@ -74,4 +89,5 @@ echo Executavel gerado em: dist\GR7BackupManager.exe
 echo.
 echo IMPORTANTE: Coloque credentials.json na mesma pasta que GR7BackupManager.exe
 echo.
+if "%NO_PAUSE%"=="1" exit /b 0
 pause

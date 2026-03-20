@@ -74,8 +74,9 @@ class ProfileForm(ctk.CTkToplevel):
         self._result  = None
 
         self.title("Editar Perfil" if profile.get("nome") else "Novo Perfil")
-        self.geometry("500x620")
-        self.resizable(False, False)
+        self.geometry("520x720")
+        self.minsize(500, 620)
+        self.resizable(True, True)
         self.configure(fg_color=BG_DARK)
         self.grab_set()   # modal
 
@@ -96,7 +97,26 @@ class ProfileForm(ctk.CTkToplevel):
                      ).pack(anchor="w", padx=24, pady=(20, 4))
         ctk.CTkFrame(self, fg_color=BORDER, height=1).pack(fill="x", padx=24)
 
-        f = ctk.CTkFrame(self, fg_color="transparent")
+        btn_row = ctk.CTkFrame(self, fg_color="transparent")
+        btn_row.pack(fill="x", padx=24, pady=14, side="bottom")
+        btn_row.columnconfigure((0, 1), weight=1)
+
+        ctk.CTkFrame(self, fg_color=BORDER, height=1).pack(fill="x", padx=24, side="bottom")
+
+        ctk.CTkButton(btn_row, text="Cancelar",
+                      fg_color=BG_INPUT, hover_color=BORDER,
+                      border_width=1, border_color=BORDER,
+                      text_color=TEXT_SEC, height=38,
+                      command=self.destroy
+                      ).grid(row=0, column=0, sticky="ew", padx=(0, 6))
+
+        ctk.CTkButton(btn_row, text="💾  Salvar Perfil",
+                      fg_color=ACCENT, hover_color=ACCENT_HOV,
+                      text_color="white", height=38,
+                      command=self._save
+                      ).grid(row=0, column=1, sticky="ew", padx=(6, 0))
+
+        f = ctk.CTkScrollableFrame(self, fg_color="transparent", corner_radius=0)
         f.pack(fill="both", expand=True, padx=24, pady=12)
         f.columnconfigure(0, weight=1)
 
@@ -194,25 +214,6 @@ class ProfileForm(ctk.CTkToplevel):
                      text="Replica estrutura de pastas no Drive",
                      font=FONT_TINY, text_color=TEXT_SEC
                      ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(0, 4))
-
-        # Buttons
-        ctk.CTkFrame(self, fg_color=BORDER, height=1).pack(fill="x", padx=24)
-        btn_row = ctk.CTkFrame(self, fg_color="transparent")
-        btn_row.pack(fill="x", padx=24, pady=14)
-        btn_row.columnconfigure((0, 1), weight=1)
-
-        ctk.CTkButton(btn_row, text="Cancelar",
-                      fg_color=BG_INPUT, hover_color=BORDER,
-                      border_width=1, border_color=BORDER,
-                      text_color=TEXT_SEC, height=38,
-                      command=self.destroy
-                      ).grid(row=0, column=0, sticky="ew", padx=(0, 6))
-
-        ctk.CTkButton(btn_row, text="💾  Salvar Perfil",
-                      fg_color=ACCENT, hover_color=ACCENT_HOV,
-                      text_color="white", height=38,
-                      command=self._save
-                      ).grid(row=0, column=1, sticky="ew", padx=(6, 0))
 
     def _load(self):
         p = self.profile
@@ -320,6 +321,7 @@ class BackupApp(ctk.CTk):
         self.scheduler  = SyncScheduler(self._do_background_sync, self.log, cancel_evt=self._sync_cancel_evt)
 
         self._sync_lock       = threading.Lock()
+        self._card_refs: dict = {}   # pid → {card, lbl_detail, base_detail}
         self._tray_icon       = None
         self._drive_connected = False
         self._sched_after_id  = None
@@ -592,6 +594,7 @@ class BackupApp(ctk.CTk):
     #  PROFILES LIST
     # ═══════════════════════════════════════════════════════════════════════════
     def _render_profiles(self):
+        self._card_refs.clear()
         for w in self.profiles_box.winfo_children():
             w.destroy()
 
@@ -623,6 +626,7 @@ class BackupApp(ctk.CTk):
         is_rotacao = p.get("modo", "rotacao") == "rotacao"
         ativo      = p.get("ativo", True)
         running    = (p.get("id") == self._running_profile_id)
+        pid        = p["id"]
 
         card = ctk.CTkFrame(self.profiles_box, fg_color=BG_CARD, corner_radius=8,
                             border_width=1,
@@ -637,53 +641,87 @@ class BackupApp(ctk.CTk):
                      text_color=modo_color, width=32
                      ).grid(row=0, column=0, rowspan=2, padx=(10, 0), pady=8)
 
-        # Nome + detalhes
+        # Nome
         ctk.CTkLabel(card, text=p.get("nome", "Sem nome"),
                      font=FONT_BODY, text_color=TEXT_PRI if ativo else TEXT_SEC,
                      anchor="w").grid(row=0, column=1, sticky="ew", padx=8, pady=(8, 0))
 
+        # Linha de detalhe — guardamos referência para atualizar sem recriar
         modo_label = "Rotação" if is_rotacao else "Espelho"
-        detail = f"{modo_label}  •  {p.get('folder_pai','')}/{p.get('cliente','')}"
+        base_detail = f"{modo_label}  •  {p.get('folder_pai','')}/{p.get('cliente','')}"
         if is_rotacao:
-            detail += f"  •  {p.get('qtd_backups', 3)} backups"
+            base_detail += f"  •  {p.get('qtd_backups', 3)} backups"
         last_ok = last_ok_by_name.get(p.get("nome"))
         if last_ok:
-            detail += f"  •  Último OK: {last_ok}"
-        if running:
-            detail += "  •  Sincronizando…"
-        ctk.CTkLabel(card, text=detail,
-                     font=FONT_TINY, text_color=TEXT_SEC, anchor="w"
-                     ).grid(row=1, column=1, sticky="ew", padx=8, pady=(0, 8))
+            base_detail += f"  •  Último OK: {last_ok}"
+
+        detail_text = base_detail + ("  •  ⟳ Sincronizando…" if running else "")
+        lbl_detail = ctk.CTkLabel(card, text=detail_text,
+                                   font=FONT_TINY, text_color=TEXT_SEC, anchor="w")
+        lbl_detail.grid(row=1, column=1, sticky="ew", padx=8, pady=(0, 8))
+
+        # Registra referências mutáveis do card indexadas pelo profile id
+        self._card_refs[pid] = {
+            "card":       card,
+            "lbl_detail": lbl_detail,
+            "base_detail": base_detail,
+            "ativo":      ativo,
+        }
 
         # Botões
         btn_frame = ctk.CTkFrame(card, fg_color="transparent")
         btn_frame.grid(row=0, column=2, rowspan=2, padx=(0, 8))
 
-        # Toggle ativo/pausado
         var_ativo = tk.BooleanVar(value=ativo)
         ctk.CTkSwitch(btn_frame, text="", variable=var_ativo,
                       onvalue=True, offvalue=False,
                       width=44, progress_color=ACCENT,
-                      command=lambda pid=p["id"], v=var_ativo: self._toggle_profile(pid, v.get())
+                      command=lambda _pid=pid, v=var_ativo: self._toggle_profile(_pid, v.get())
                       ).pack(side="left", padx=4)
 
         ctk.CTkButton(btn_frame, text="▶", width=30, height=28,
                       fg_color=BG_INPUT, hover_color=BORDER,
                       text_color=TEXT_SEC, font=FONT_BODY,
-                      command=lambda pid=p["id"]: self._sync_profile_now(pid)
+                      command=lambda _pid=pid: self._sync_profile_now(_pid)
                       ).pack(side="left", padx=2)
 
         ctk.CTkButton(btn_frame, text="✎", width=30, height=28,
                       fg_color=BG_INPUT, hover_color=BORDER,
                       text_color=TEXT_SEC, font=FONT_BODY,
-                      command=lambda pid=p["id"]: self._edit_profile(pid)
+                      command=lambda _pid=pid: self._edit_profile(_pid)
                       ).pack(side="left", padx=2)
 
         ctk.CTkButton(btn_frame, text="🗑", width=30, height=28,
                       fg_color=BG_INPUT, hover_color=ACCENT_RED,
                       text_color=TEXT_SEC, font=FONT_BODY,
-                      command=lambda pid=p["id"], pn=p.get("nome",""): self._delete_profile(pid, pn)
+                      command=lambda _pid=pid, pn=p.get("nome",""): self._delete_profile(_pid, pn)
                       ).pack(side="left", padx=2)
+
+    def _update_running_card(self, pid: str | None, prev_pid: str | None = None):
+        """
+        Atualiza visualmente apenas o card que mudou de estado (rodando / parado).
+        Não destrói nem recria nenhum widget — só altera texto e borda.
+        """
+        def _apply(profile_id, is_running):
+            refs = self._card_refs.get(profile_id)
+            if not refs:
+                return
+            card       = refs["card"]
+            lbl_detail = refs["lbl_detail"]
+            base       = refs["base_detail"]
+            ativo      = refs["ativo"]
+            try:
+                border = ACCENT_BLUE if is_running else (ACCENT if ativo else BORDER)
+                card.configure(border_color=border)
+                suffix = "  •  ⟳ Sincronizando…" if is_running else ""
+                lbl_detail.configure(text=base + suffix)
+            except tk.TclError:
+                pass   # widget pode ter sido destruído por _render_profiles
+
+        if prev_pid and prev_pid != pid:
+            _apply(prev_pid, False)
+        if pid:
+            _apply(pid, True)
 
     # ═══════════════════════════════════════════════════════════════════════════
     #  PROFILE ACTIONS
@@ -754,8 +792,10 @@ class BackupApp(ctk.CTk):
                 self._drive_connected = True
                 self.after(0, self._on_drive_connected)
 
+            prev_pid = self._running_profile_id
             self._running_profile_id = profile_id
-            self.after(0, self._render_profiles)
+            self.after(0, lambda cur=profile_id, prv=prev_pid:
+                       self._update_running_card(cur, prv))
             self.after(0, self.progress.start)
 
             try:
@@ -765,8 +805,9 @@ class BackupApp(ctk.CTk):
             self.config_mgr.save({**data, "history": history})
             self.refresh_history(history)
         finally:
+            prev = self._running_profile_id
             self._running_profile_id = None
-            self.after(0, self._render_profiles)
+            self.after(0, lambda prv=prev: self._update_running_card(None, prv))
             self.after(0, self._progress_stop_reset)
             self._sync_lock.release()
 
@@ -986,8 +1027,10 @@ class BackupApp(ctk.CTk):
                 if self._sync_cancel_evt.is_set():
                     self.log("Sincronização cancelada.", "WARN")
                     break
+                prev_pid = self._running_profile_id
                 self._running_profile_id = profile.get("id")
-                self.after(0, self._render_profiles)
+                self.after(0, lambda cur=self._running_profile_id, prv=prev_pid:
+                           self._update_running_card(cur, prv))
                 try:
                     self.backup_mgr.run_sync(profile, history, self._sync_cancel_evt)
                 except (OSError, ValueError, KeyError, TypeError) as e:
@@ -997,8 +1040,9 @@ class BackupApp(ctk.CTk):
             self.refresh_history(history)
 
         finally:
+            prev = self._running_profile_id
             self._running_profile_id = None
-            self.after(0, self._render_profiles)
+            self.after(0, lambda prv=prev: self._update_running_card(None, prv))
             self._sync_lock.release()
             self.after(0, self._progress_stop_reset)
 
