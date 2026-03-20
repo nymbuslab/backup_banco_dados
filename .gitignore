@@ -13,6 +13,7 @@ env/
 token.pkl
 credentials.json
 backup_config.json
+backup_config.json.bak
 
 *.log
 *.exe

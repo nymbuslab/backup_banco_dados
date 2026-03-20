@@ -26,34 +26,24 @@ ACCENT         = "#238636"
 ACCENT_HOV     = "#2EA043"
 ACCENT_RED     = "#B91C1C"
 ACCENT_RED_HOV = "#991B1B"
+ACCENT_BLUE    = "#1F6FEB"
+ACCENT_BLUE_HOV= "#388BFD"
 TEXT_PRI       = "#E6EDF3"
 TEXT_SEC       = "#8B949E"
 TEXT_GRN       = "#3FB950"
 TEXT_RED       = "#F85149"
 TEXT_YEL       = "#D29922"
+TEXT_BLUE      = "#58A6FF"
 FONT_MONO      = ("Consolas", 11)
 FONT_HEAD      = ("Segoe UI", 20, "bold")
 FONT_SUB       = ("Segoe UI", 12, "bold")
 FONT_BODY      = ("Segoe UI", 11)
 FONT_SMALL     = ("Segoe UI", 10)
+FONT_TINY      = ("Segoe UI", 9)
 
 
 def _resolve_icon() -> str | None:
-    """
-    Localiza gr7backup.ico em todas as localizações possíveis:
-
-    .exe (PyInstaller --onefile):
-        sys._MEIPASS/assets/gr7backup.ico   ← --add-data "assets\\gr7backup.ico;assets"
-        sys._MEIPASS/gr7backup.ico           ← --add-data "assets\\gr7backup.ico;."
-        <pasta do .exe>/assets/gr7backup.ico ← copiado manualmente
-        <pasta do .exe>/gr7backup.ico        ← copiado manualmente raiz
-
-    .py (desenvolvimento):
-        <pasta do main.py>/assets/gr7backup.ico
-        <pasta do main.py>/gr7backup.ico
-    """
     candidates = []
-
     if getattr(sys, "frozen", False):
         meipass = getattr(sys, "_MEIPASS", "")
         exe_dir = os.path.dirname(os.path.abspath(sys.executable))
@@ -65,46 +55,299 @@ def _resolve_icon() -> str | None:
         base = os.path.dirname(os.path.abspath(sys.argv[0]))
         candidates.append(os.path.join(base, "assets", "gr7backup.ico"))
         candidates.append(os.path.join(base, "gr7backup.ico"))
-
-    for path in candidates:
-        if os.path.exists(path):
-            return path
+    for p in candidates:
+        if os.path.exists(p):
+            return p
     return None
 
 
-class BackupApp(ctk.CTk):
-    def __init__(self):
-        super().__init__()
-        self.title(APP_NAME)
-        self.geometry("1120x740")
-        self.minsize(960, 600)
-        self.configure(fg_color=BG_DARK)
+# ─────────────────────────────────────────────────────────────────────────────
+#  Profile Form (modal window)
+# ─────────────────────────────────────────────────────────────────────────────
+class ProfileForm(ctk.CTkToplevel):
+    """Janela modal para criar/editar um perfil."""
 
-        # ── Ícone ────────────────────────────────────────────────────────────
+    def __init__(self, parent, profile: dict, on_save):
+        super().__init__(parent)
+        self.profile  = dict(profile)   # cópia
+        self.on_save  = on_save
+        self._result  = None
+
+        self.title("Editar Perfil" if profile.get("nome") else "Novo Perfil")
+        self.geometry("500x620")
+        self.resizable(False, False)
+        self.configure(fg_color=BG_DARK)
+        self.grab_set()   # modal
+
         ico = _resolve_icon()
         if ico:
             try:
                 self.iconbitmap(ico)
-            except Exception:
+            except (tk.TclError, OSError):
                 pass
 
-        # ── Serviços ─────────────────────────────────────────────────────────
+        self._build()
+        self._load()
+
+    def _build(self):
+        # Title
+        ctk.CTkLabel(self, text="Configuração do Perfil",
+                     font=FONT_SUB, text_color=TEXT_PRI
+                     ).pack(anchor="w", padx=24, pady=(20, 4))
+        ctk.CTkFrame(self, fg_color=BORDER, height=1).pack(fill="x", padx=24)
+
+        f = ctk.CTkFrame(self, fg_color="transparent")
+        f.pack(fill="both", expand=True, padx=24, pady=12)
+        f.columnconfigure(0, weight=1)
+
+        def lbl(text, row):
+            ctk.CTkLabel(f, text=text, font=FONT_SMALL,
+                         text_color=TEXT_SEC).grid(row=row, column=0,
+                                                   sticky="w", pady=(10, 2))
+        def ent(row, ph):
+            e = ctk.CTkEntry(f, placeholder_text=ph, fg_color=BG_INPUT,
+                             border_color=BORDER, text_color=TEXT_PRI,
+                             height=36, font=FONT_BODY)
+            e.grid(row=row, column=0, sticky="ew")
+            return e
+
+        lbl("Nome do perfil", 0)
+        self.ent_nome = ent(1, "ex: Banco de Dados TESTE")
+
+        # Modo
+        lbl("Modo de backup", 2)
+        self.var_modo = tk.StringVar(value="rotacao")
+        modo_row = ctk.CTkFrame(f, fg_color="transparent")
+        modo_row.grid(row=3, column=0, sticky="ew")
+        self.seg_modo = ctk.CTkSegmentedButton(
+            modo_row,
+            values=["Rotação", "Espelho"],
+            variable=tk.StringVar(value="Rotação"),
+            fg_color=BG_INPUT, selected_color=ACCENT,
+            selected_hover_color=ACCENT_HOV,
+            unselected_color=BG_INPUT, unselected_hover_color=BORDER,
+            text_color=TEXT_PRI, font=FONT_BODY,
+            command=self._on_modo_change)
+        self.seg_modo.pack(side="left")
+
+        self.lbl_modo_hint = ctk.CTkLabel(modo_row,
+            text="Mantém os N mais recentes",
+            font=FONT_TINY, text_color=TEXT_SEC)
+        self.lbl_modo_hint.pack(side="left", padx=10)
+
+        lbl("Pasta Pai no Drive", 4)
+        self.ent_folder_pai = ent(5, f"ex: {DEFAULT_PASTA}")
+
+        lbl("Cliente (pasta filho no Drive)", 6)
+        self.ent_cliente = ent(7, "ex: FISCAL")
+
+        lbl("Pasta de Backup Local", 8)
+        br = ctk.CTkFrame(f, fg_color="transparent")
+        br.grid(row=9, column=0, sticky="ew")
+        br.columnconfigure(0, weight=1)
+        self.ent_backup_dir = ctk.CTkEntry(br, placeholder_text="Selecione a pasta...",
+                                           fg_color=BG_INPUT, border_color=BORDER,
+                                           text_color=TEXT_PRI, height=36, font=FONT_BODY)
+        self.ent_backup_dir.grid(row=0, column=0, sticky="ew", padx=(0, 6))
+        ctk.CTkButton(br, text="📂", width=36, height=36,
+                      fg_color=BG_INPUT, hover_color=BORDER,
+                      border_width=1, border_color=BORDER,
+                      command=self._browse).grid(row=0, column=1)
+
+        lbl("Extensão dos arquivos", 10)
+        self.ent_ext = ctk.CTkEntry(f, fg_color=BG_INPUT, border_color=BORDER,
+                                    text_color=TEXT_PRI, height=36, font=FONT_BODY,
+                                    placeholder_text=".sql  (vazio = todos os arquivos)")
+        self.ent_ext.grid(row=11, column=0, sticky="ew")
+
+        # Qtd backups — só para rotação
+        self.frame_qtd = ctk.CTkFrame(f, fg_color="transparent")
+        self.frame_qtd.grid(row=12, column=0, sticky="ew")
+        self.frame_qtd.columnconfigure(0, weight=1)
+        ctk.CTkLabel(self.frame_qtd, text="Backups armazenados (máx.)",
+                     font=FONT_SMALL, text_color=TEXT_SEC
+                     ).grid(row=0, column=0, sticky="w", pady=(10, 2))
+        self.var_qtd = tk.IntVar(value=3)
+        self.spin_qtd = ctk.CTkSegmentedButton(
+            self.frame_qtd, values=["1", "2", "3", "5", "7", "10"],
+            variable=tk.StringVar(value="3"),
+            fg_color=BG_INPUT, selected_color=ACCENT,
+            selected_hover_color=ACCENT_HOV,
+            unselected_color=BG_INPUT, unselected_hover_color=BORDER,
+            text_color=TEXT_PRI, font=FONT_SMALL,
+            command=lambda v: self.var_qtd.set(int(v)))
+        self.spin_qtd.grid(row=1, column=0, sticky="w")
+
+        # Incluir subpastas — só para espelho
+        self.frame_rec = ctk.CTkFrame(f, fg_color="transparent")
+        self.frame_rec.grid(row=13, column=0, sticky="ew")
+        self.frame_rec.columnconfigure(1, weight=1)
+        ctk.CTkLabel(self.frame_rec, text="Incluir subpastas",
+                     font=FONT_SMALL, text_color=TEXT_SEC
+                     ).grid(row=0, column=0, sticky="w", pady=(10, 2))
+        self.var_recursivo = tk.BooleanVar(value=False)
+        ctk.CTkSwitch(self.frame_rec, text="", variable=self.var_recursivo,
+                      onvalue=True, offvalue=False, width=44,
+                      progress_color=ACCENT
+                      ).grid(row=0, column=1, sticky="e")
+        ctk.CTkLabel(self.frame_rec,
+                     text="Replica estrutura de pastas no Drive",
+                     font=FONT_TINY, text_color=TEXT_SEC
+                     ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(0, 4))
+
+        # Buttons
+        ctk.CTkFrame(self, fg_color=BORDER, height=1).pack(fill="x", padx=24)
+        btn_row = ctk.CTkFrame(self, fg_color="transparent")
+        btn_row.pack(fill="x", padx=24, pady=14)
+        btn_row.columnconfigure((0, 1), weight=1)
+
+        ctk.CTkButton(btn_row, text="Cancelar",
+                      fg_color=BG_INPUT, hover_color=BORDER,
+                      border_width=1, border_color=BORDER,
+                      text_color=TEXT_SEC, height=38,
+                      command=self.destroy
+                      ).grid(row=0, column=0, sticky="ew", padx=(0, 6))
+
+        ctk.CTkButton(btn_row, text="💾  Salvar Perfil",
+                      fg_color=ACCENT, hover_color=ACCENT_HOV,
+                      text_color="white", height=38,
+                      command=self._save
+                      ).grid(row=0, column=1, sticky="ew", padx=(6, 0))
+
+    def _load(self):
+        p = self.profile
+        if p.get("nome"):       self.ent_nome.insert(0, p["nome"])
+        if p.get("folder_pai"): self.ent_folder_pai.insert(0, p["folder_pai"])
+        else:                   self.ent_folder_pai.insert(0, DEFAULT_PASTA)
+        if p.get("cliente"):    self.ent_cliente.insert(0, p["cliente"])
+        if p.get("backup_dir"): self.ent_backup_dir.insert(0, p["backup_dir"])
+        if p.get("extensoes"):  self.ent_ext.insert(0, p["extensoes"])
+
+        modo = p.get("modo", "rotacao")
+        label = "Rotação" if modo == "rotacao" else "Espelho"
+        self.seg_modo.set(label)
+        self._on_modo_change(label)
+
+        qtd = str(p.get("qtd_backups", 3))
+        if qtd in ["1","2","3","5","7","10"]:
+            self.spin_qtd.set(qtd)
+            self.var_qtd.set(int(qtd))
+
+        self.var_recursivo.set(p.get("recursivo", False))
+
+    def _on_modo_change(self, value: str):
+        is_rotacao = (value == "Rotação")
+        self.var_modo.set("rotacao" if is_rotacao else "espelho")
+        self.lbl_modo_hint.configure(
+            text="Mantém os N mais recentes" if is_rotacao else "Envia tudo, nunca remove do Drive"
+        )
+        # Mostra/esconde campos conforme o modo
+        if is_rotacao:
+            self.frame_qtd.grid()
+            self.frame_rec.grid_remove()
+        else:
+            self.frame_qtd.grid_remove()
+            self.frame_rec.grid()
+
+    def _browse(self):
+        path = filedialog.askdirectory(title="Selecione a pasta de backup")
+        if path:
+            self.ent_backup_dir.delete(0, "end")
+            self.ent_backup_dir.insert(0, path)
+
+    def _save(self):
+        nome       = self.ent_nome.get().strip()
+        folder_pai = self.ent_folder_pai.get().strip()
+        cliente    = self.ent_cliente.get().strip()
+        backup_dir = self.ent_backup_dir.get().strip()
+        extensoes  = self.ent_ext.get().strip()
+        modo       = self.var_modo.get()
+        qtd        = self.var_qtd.get()
+
+        errors = []
+        if not nome:       errors.append("Nome do perfil")
+        if not folder_pai: errors.append("Pasta Pai no Drive")
+        if not cliente:    errors.append("Cliente")
+        if not backup_dir: errors.append("Pasta de Backup Local")
+
+        if errors:
+            messagebox.showerror("Campos obrigatórios",
+                                 "Preencha:\n• " + "\n• ".join(errors),
+                                 parent=self)
+            return
+
+        if not os.path.isdir(backup_dir):
+            messagebox.showerror("Pasta inválida",
+                                 f"A pasta não existe:\n{backup_dir}", parent=self)
+            return
+
+        self.profile.update({
+            "nome":       nome,
+            "modo":       modo,
+            "folder_pai": folder_pai,
+            "cliente":    cliente,
+            "backup_dir": backup_dir,
+            "extensoes":  extensoes,
+            "qtd_backups": qtd,
+            "recursivo":  self.var_recursivo.get(),
+        })
+        self.on_save(self.profile)
+        self.destroy()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Main App
+# ─────────────────────────────────────────────────────────────────────────────
+class BackupApp(ctk.CTk):
+    def __init__(self):
+        super().__init__()
+        self.title(APP_NAME)
+        self.geometry("1180x760")
+        self.minsize(1000, 620)
+        self.configure(fg_color=BG_DARK)
+
+        ico = _resolve_icon()
+        if ico:
+            try:
+                self.iconbitmap(ico)
+            except (tk.TclError, OSError):
+                pass
+
         self.config_mgr = ConfigManager()
         self.drive_svc  = DriveService(self.log)
         self.backup_mgr = BackupManager(self.drive_svc, self.log, self.refresh_history)
-        self.scheduler  = SyncScheduler(self._do_background_sync, self.log)
+        self._sync_cancel_evt = threading.Event()
+        self.scheduler  = SyncScheduler(self._do_background_sync, self.log, cancel_evt=self._sync_cancel_evt)
 
         self._sync_lock       = threading.Lock()
-        self._sync_cancel_evt = threading.Event()
         self._tray_icon       = None
         self._drive_connected = False
-        # Guarda os valores salvos para detectar mudanças não salvas
-        self._saved_snapshot  = {}
-        self._progress_active = False
-        self._progress_start  = None
+        self._sched_after_id  = None
+        self._log_progress_active = False
+        self._log_progress_start  = None
+        self._running_profile_id  = None
+        self._modal_count         = 0
+        self.conn_badge = None
+        self.btn_connect = None
+        self.profiles_box = None
+        self.btn_sync = None
+        self.var_auto = None
+        self.sw_auto = None
+        self.var_interval = None
+        self.cmb_interval = None
+        self.lbl_next = None
+        self.lbl_last = None
+        self.var_boot = None
+        self.sw_boot = None
+        self.lbl_hist_count = None
+        self.hist_box = None
+        self.log_text = None
+        self.lbl_status = None
+        self.lbl_sched_status = None
+        self.progress = None
 
         self._build_ui()
-        self._load_config()
+        self._load_all()
         self._check_drive_connection()
 
         self.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -115,7 +358,15 @@ class BackupApp(ctk.CTk):
     # ═══════════════════════════════════════════════════════════════════════════
     def _build_ui(self):
         self._build_header()
-        self._build_body()
+
+        body = ctk.CTkFrame(self, fg_color="transparent")
+        body.pack(fill="both", expand=True, padx=16)
+        body.columnconfigure(0, weight=2, minsize=380)
+        body.columnconfigure(1, weight=3)
+        body.rowconfigure(0, weight=1)
+
+        self._build_left_panel(body)
+        self._build_right_panel(body)
         self._build_statusbar()
 
     # ── Header ─────────────────────────────────────────────────────────────────
@@ -123,10 +374,8 @@ class BackupApp(ctk.CTk):
         hdr = ctk.CTkFrame(self, fg_color=BG_CARD, corner_radius=0, height=64)
         hdr.pack(fill="x")
         hdr.pack_propagate(False)
-
         inner = ctk.CTkFrame(hdr, fg_color="transparent")
         inner.pack(fill="both", expand=True, padx=20)
-
         ctk.CTkLabel(inner, text="☁", font=("Segoe UI", 26),
                      text_color=ACCENT).pack(side="left", padx=(0, 10))
         ctk.CTkLabel(inner, text=APP_NAME,
@@ -143,108 +392,87 @@ class BackupApp(ctk.CTk):
         self.conn_badge.pack(side="right", padx=10)
 
         self.btn_connect = ctk.CTkButton(
-            inner, text="Conectar Drive", width=150, height=32,
+            inner, text="Conectar Drive", width=155, height=32,
             fg_color=BG_INPUT, hover_color=BORDER,
             border_color=BORDER, border_width=1,
             font=FONT_SMALL, text_color=TEXT_SEC,
             command=self._toggle_drive_connection)
         self.btn_connect.pack(side="right")
-
         ctk.CTkFrame(self, fg_color=BORDER, height=1, corner_radius=0).pack(fill="x")
 
-    # ── Body ──────────────────────────────────────────────────────────────────
-    def _build_body(self):
-        body = ctk.CTkFrame(self, fg_color="transparent")
-        body.pack(fill="both", expand=True, padx=16)
-        body.columnconfigure(0, weight=2, minsize=360)
-        body.columnconfigure(1, weight=3)
-        body.rowconfigure(0, weight=1)
-        self._build_config_panel(body)
-        self._build_log_panel(body)
-
-    # ── Config panel ──────────────────────────────────────────────────────────
-    def _build_config_panel(self, parent):
+    # ── Left panel ─────────────────────────────────────────────────────────────
+    def _build_left_panel(self, parent):
         card = ctk.CTkFrame(parent, fg_color=BG_CARD, corner_radius=10,
                             border_width=1, border_color=BORDER)
         card.grid(row=0, column=0, sticky="nsew", padx=(0, 8), pady=12)
         card.columnconfigure(0, weight=1)
-        card.rowconfigure(2, weight=1)
+        card.rowconfigure(1, weight=1)
 
-        ctk.CTkLabel(card, text="Configuração", font=FONT_SUB,
-                     text_color=TEXT_PRI).grid(row=0, column=0,
-                                               sticky="w", padx=20, pady=(14, 6))
+        # ── Profiles header
+        prof_hdr = ctk.CTkFrame(card, fg_color="transparent")
+        prof_hdr.grid(row=0, column=0, sticky="ew", padx=20, pady=(14, 6))
+        ctk.CTkLabel(prof_hdr, text="Perfis de Backup",
+                     font=FONT_SUB, text_color=TEXT_PRI).pack(side="left")
+        ctk.CTkButton(prof_hdr, text="+ Novo Perfil", width=110, height=28,
+                      fg_color=ACCENT_BLUE, hover_color=ACCENT_BLUE_HOV,
+                      text_color="white", font=FONT_SMALL,
+                      command=self._new_profile).pack(side="right")
+
         ctk.CTkFrame(card, fg_color=BORDER, height=1).grid(
-            row=1, column=0, sticky="ew", padx=20)
+            row=0, column=0, sticky="ew", padx=20, pady=(42, 0))
 
-        scroll = ctk.CTkScrollableFrame(card, fg_color="transparent",
-                                        scrollbar_button_color=BORDER,
-                                        scrollbar_button_hover_color=TEXT_SEC)
-        scroll.grid(row=2, column=0, sticky="nsew", padx=2, pady=4)
-        scroll.columnconfigure(0, weight=1)
+        # ── Profiles list (scrollable)
+        self.profiles_box = ctk.CTkScrollableFrame(card, fg_color="transparent",
+                                                    scrollbar_button_color=BORDER,
+                                                    scrollbar_button_hover_color=TEXT_SEC)
+        self.profiles_box.grid(row=1, column=0, sticky="nsew", padx=4, pady=4)
+        self.profiles_box.columnconfigure(0, weight=1)
 
-        f = ctk.CTkFrame(scroll, fg_color="transparent")
-        f.pack(fill="x", padx=18, pady=(2, 8))
-        f.columnconfigure(0, weight=1)
+        # ── Separator + global settings
+        ctk.CTkFrame(card, fg_color=BORDER, height=1).grid(
+            row=2, column=0, sticky="ew", padx=20, pady=(4, 0))
 
-        def lbl(text, row):
-            ctk.CTkLabel(f, text=text, font=FONT_SMALL,
-                         text_color=TEXT_SEC).grid(row=row, column=0,
-                                                   sticky="w", pady=(10, 2))
+        settings_scroll = ctk.CTkScrollableFrame(card, fg_color="transparent",
+                                                  height=200,
+                                                  scrollbar_button_color=BORDER,
+                                                  scrollbar_button_hover_color=TEXT_SEC)
+        settings_scroll.grid(row=3, column=0, sticky="ew", padx=4)
+        settings_scroll.columnconfigure(0, weight=1)
+        self._build_global_settings(settings_scroll)
 
-        def ent(row, placeholder):
-            e = ctk.CTkEntry(f, placeholder_text=placeholder,
-                             fg_color=BG_INPUT, border_color=BORDER,
-                             text_color=TEXT_PRI, height=36, font=FONT_BODY)
-            e.grid(row=row, column=0, sticky="ew")
-            return e
+        # ── Bottom buttons
+        ctk.CTkFrame(card, fg_color=BORDER, height=1).grid(
+            row=4, column=0, sticky="ew", padx=20)
 
-        lbl("Pasta Pai no Drive", 0)
-        self.ent_folder_pai = ent(1, f"ex: {DEFAULT_PASTA}")
-        self.ent_folder_pai.insert(0, DEFAULT_PASTA)
+        btn_row = ctk.CTkFrame(card, fg_color="transparent")
+        btn_row.grid(row=5, column=0, sticky="ew", padx=20, pady=12)
+        btn_row.columnconfigure((0, 1), weight=1)
 
-        lbl("Cliente (pasta filho)", 2)
-        self.ent_cliente = ent(3, "ex: Empresa ABC")
-
-        lbl("Pasta de Backup Local", 4)
-        br = ctk.CTkFrame(f, fg_color="transparent")
-        br.grid(row=5, column=0, sticky="ew")
-        br.columnconfigure(0, weight=1)
-        self.ent_backup_dir = ctk.CTkEntry(br, placeholder_text="Selecione a pasta...",
-                                           fg_color=BG_INPUT, border_color=BORDER,
-                                           text_color=TEXT_PRI, height=36, font=FONT_BODY)
-        self.ent_backup_dir.grid(row=0, column=0, sticky="ew", padx=(0, 6))
-        ctk.CTkButton(br, text="📂", width=36, height=36,
+        ctk.CTkButton(btn_row, text="💾  Salvar Config",
                       fg_color=BG_INPUT, hover_color=BORDER,
                       border_width=1, border_color=BORDER,
-                      command=self._browse_folder).grid(row=0, column=1)
+                      text_color=TEXT_SEC, font=FONT_BODY, height=40,
+                      command=self._save_globals
+                      ).grid(row=0, column=0, sticky="ew", padx=(0, 4))
 
-        lbl("Backups armazenados (máx.)", 6)
-        self.var_qtd = tk.IntVar(value=3)
-        self.spin_qtd = ctk.CTkSegmentedButton(
-            f, values=["1", "2", "3", "5", "7", "10"],
-            variable=tk.StringVar(value="3"),
-            fg_color=BG_INPUT, selected_color=ACCENT,
-            selected_hover_color=ACCENT_HOV,
-            unselected_color=BG_INPUT, unselected_hover_color=BORDER,
-            text_color=TEXT_PRI, font=FONT_SMALL,
-            command=lambda v: self.var_qtd.set(int(v)))
-        self.spin_qtd.grid(row=7, column=0, sticky="w")
+        self.btn_sync = ctk.CTkButton(btn_row, text="▶  Sincronizar",
+                                      fg_color=ACCENT, hover_color=ACCENT_HOV,
+                                      text_color="white",
+                                      font=("Segoe UI", 11, "bold"),
+                                      height=40, command=self._on_sync_button)
+        self.btn_sync.grid(row=0, column=1, sticky="ew", padx=(4, 0))
 
-        lbl("Extensão dos arquivos de backup", 8)
-        self.ent_ext = ctk.CTkEntry(f,
-                                    placeholder_text=".sql  (vírgula para múltiplas: .sql,.bak)",
-                                    fg_color=BG_INPUT, border_color=BORDER,
-                                    text_color=TEXT_PRI, height=36, font=FONT_BODY)
-        self.ent_ext.grid(row=9, column=0, sticky="ew", pady=(0, 2))
+    def _build_global_settings(self, parent):
+        f = ctk.CTkFrame(parent, fg_color="transparent")
+        f.pack(fill="x", padx=16, pady=4)
+        f.columnconfigure(0, weight=1)
 
-        # ── Agendamento ─────────────────────────────────────────────────────
-        ctk.CTkFrame(f, fg_color=BORDER, height=1).grid(
-            row=10, column=0, sticky="ew", pady=(14, 0))
-        ctk.CTkLabel(f, text="Sincronização Automática", font=FONT_SUB,
-                     text_color=TEXT_PRI).grid(row=11, column=0, sticky="w", pady=(10, 6))
+        ctk.CTkLabel(f, text="Sincronização Automática",
+                     font=FONT_SUB, text_color=TEXT_PRI
+                     ).grid(row=0, column=0, sticky="w", pady=(8, 6))
 
         auto_row = ctk.CTkFrame(f, fg_color="transparent")
-        auto_row.grid(row=12, column=0, sticky="ew")
+        auto_row.grid(row=1, column=0, sticky="ew")
         auto_row.columnconfigure(1, weight=1)
         ctk.CTkLabel(auto_row, text="Usar intervalo de agendamento",
                      font=FONT_BODY, text_color=TEXT_PRI).grid(row=0, column=0, sticky="w")
@@ -256,36 +484,35 @@ class BackupApp(ctk.CTk):
         self.sw_auto.grid(row=0, column=1, sticky="e")
 
         ctk.CTkLabel(f, text="Desativado: verifica a cada 5 min (modo contínuo)",
-                     font=FONT_SMALL, text_color=TEXT_SEC
-                     ).grid(row=13, column=0, sticky="w", pady=(2, 0))
+                     font=FONT_TINY, text_color=TEXT_SEC
+                     ).grid(row=2, column=0, sticky="w", pady=(2, 4))
 
-        lbl("Intervalo de agendamento", 14)
+        ctk.CTkLabel(f, text="Intervalo", font=FONT_SMALL,
+                     text_color=TEXT_SEC).grid(row=3, column=0, sticky="w", pady=(4, 2))
         self.var_interval = tk.StringVar(value="1 hora")
         self.cmb_interval = ctk.CTkOptionMenu(
             f, values=list(SyncScheduler.INTERVALS.keys()),
-            variable=self.var_interval,
-            fg_color=BG_INPUT, button_color=BORDER,
-            button_hover_color=TEXT_SEC, text_color=TEXT_PRI,
-            dropdown_fg_color=BG_CARD, dropdown_hover_color=BORDER,
-            dropdown_text_color=TEXT_PRI, font=FONT_BODY, height=36,
-            command=self._on_interval_change)
-        self.cmb_interval.grid(row=15, column=0, sticky="ew")
+            variable=self.var_interval, fg_color=BG_INPUT,
+            button_color=BORDER, button_hover_color=TEXT_SEC,
+            text_color=TEXT_PRI, dropdown_fg_color=BG_CARD,
+            dropdown_hover_color=BORDER, dropdown_text_color=TEXT_PRI,
+            font=FONT_BODY, height=34, command=self._on_interval_change)
+        self.cmb_interval.grid(row=4, column=0, sticky="ew")
 
         self.lbl_next = ctk.CTkLabel(f, text="Próximo sync: —",
-                                      font=FONT_SMALL, text_color=TEXT_SEC)
-        self.lbl_next.grid(row=16, column=0, sticky="w", pady=(6, 0))
+                                      font=FONT_TINY, text_color=TEXT_SEC)
+        self.lbl_next.grid(row=5, column=0, sticky="w", pady=(4, 0))
         self.lbl_last = ctk.CTkLabel(f, text="Último sync:  —",
-                                      font=FONT_SMALL, text_color=TEXT_SEC)
-        self.lbl_last.grid(row=17, column=0, sticky="w", pady=(2, 0))
+                                      font=FONT_TINY, text_color=TEXT_SEC)
+        self.lbl_last.grid(row=6, column=0, sticky="w", pady=(2, 0))
 
-        # ── Sistema ─────────────────────────────────────────────────────────
         ctk.CTkFrame(f, fg_color=BORDER, height=1).grid(
-            row=18, column=0, sticky="ew", pady=(14, 0))
+            row=7, column=0, sticky="ew", pady=(10, 0))
         ctk.CTkLabel(f, text="Sistema", font=FONT_SUB,
-                     text_color=TEXT_PRI).grid(row=19, column=0, sticky="w", pady=(10, 6))
+                     text_color=TEXT_PRI).grid(row=8, column=0, sticky="w", pady=(8, 6))
 
         boot_row = ctk.CTkFrame(f, fg_color="transparent")
-        boot_row.grid(row=20, column=0, sticky="ew")
+        boot_row.grid(row=9, column=0, sticky="ew")
         boot_row.columnconfigure(1, weight=1)
         ctk.CTkLabel(boot_row, text="Iniciar com o Windows",
                      font=FONT_BODY, text_color=TEXT_PRI).grid(row=0, column=0, sticky="w")
@@ -295,35 +522,12 @@ class BackupApp(ctk.CTk):
                                        progress_color=ACCENT,
                                        command=self._toggle_autostart)
         self.sw_boot.grid(row=0, column=1, sticky="e")
-        ctk.CTkLabel(f, text="O app inicia minimizado na bandeja do sistema.",
-                     font=FONT_SMALL, text_color=TEXT_SEC,
-                     wraplength=280, justify="left"
-                     ).grid(row=21, column=0, sticky="w", pady=(2, 8))
+        ctk.CTkLabel(f, text="Inicia minimizado na bandeja.",
+                     font=FONT_TINY, text_color=TEXT_SEC
+                     ).grid(row=10, column=0, sticky="w", pady=(2, 8))
 
-        # ── Botões fixos ─────────────────────────────────────────────────────
-        ctk.CTkFrame(card, fg_color=BORDER, height=1).grid(
-            row=3, column=0, sticky="ew", padx=20)
-
-        btn_row = ctk.CTkFrame(card, fg_color="transparent")
-        btn_row.grid(row=4, column=0, sticky="ew", padx=20, pady=12)
-        btn_row.columnconfigure((0, 1), weight=1)
-
-        ctk.CTkButton(btn_row, text="💾  Salvar Config",
-                      fg_color=BG_INPUT, hover_color=BORDER,
-                      border_width=1, border_color=BORDER,
-                      text_color=TEXT_SEC, font=FONT_BODY, height=40,
-                      command=self._save_config
-                      ).grid(row=0, column=0, sticky="ew", padx=(0, 4))
-
-        self.btn_sync = ctk.CTkButton(btn_row, text="▶  Sincronizar",
-                                      fg_color=ACCENT, hover_color=ACCENT_HOV,
-                                      text_color="white",
-                                      font=("Segoe UI", 11, "bold"),
-                                      height=40, command=self._on_sync_button)
-        self.btn_sync.grid(row=0, column=1, sticky="ew", padx=(4, 0))
-
-    # ── Log + History panel ───────────────────────────────────────────────────
-    def _build_log_panel(self, parent):
+    # ── Right panel (log + history) ────────────────────────────────────────────
+    def _build_right_panel(self, parent):
         card = ctk.CTkFrame(parent, fg_color=BG_CARD, corner_radius=10,
                             border_width=1, border_color=BORDER)
         card.grid(row=0, column=1, sticky="nsew", pady=12)
@@ -360,16 +564,15 @@ class BackupApp(ctk.CTk):
 
         self.log_text = ctk.CTkTextbox(card, fg_color=BG_INPUT,
                                        text_color=TEXT_PRI, font=FONT_MONO,
-                                       corner_radius=6, wrap="word",
-                                       state="disabled")
+                                       corner_radius=6, wrap="word", state="disabled")
         self.log_text.grid(row=4, column=0, sticky="nsew", padx=20, pady=(0, 14))
-        self.log_text._textbox.tag_configure("INFO",  foreground=TEXT_SEC)
-        self.log_text._textbox.tag_configure("OK",    foreground=TEXT_GRN)
-        self.log_text._textbox.tag_configure("WARN",  foreground=TEXT_YEL)
-        self.log_text._textbox.tag_configure("ERROR", foreground=TEXT_RED)
-        self.log_text._textbox.tag_configure("PROGRESS", foreground=TEXT_SEC)
+        log_box = getattr(self.log_text, "_textbox")
+        log_box.tag_configure("INFO",  foreground=TEXT_SEC)
+        log_box.tag_configure("OK",    foreground=TEXT_GRN)
+        log_box.tag_configure("WARN",  foreground=TEXT_YEL)
+        log_box.tag_configure("ERROR", foreground=TEXT_RED)
+        log_box.tag_configure("PROGRESS", foreground=TEXT_BLUE)
 
-    # ── Status bar ────────────────────────────────────────────────────────────
     def _build_statusbar(self):
         bar = ctk.CTkFrame(self, fg_color=BG_CARD, corner_radius=0, height=28)
         bar.pack(fill="x", side="bottom")
@@ -386,6 +589,205 @@ class BackupApp(ctk.CTk):
         self.progress.set(0)
 
     # ═══════════════════════════════════════════════════════════════════════════
+    #  PROFILES LIST
+    # ═══════════════════════════════════════════════════════════════════════════
+    def _render_profiles(self):
+        for w in self.profiles_box.winfo_children():
+            w.destroy()
+
+        data     = self.config_mgr.load()
+        profiles = data.get("profiles", [])
+        history  = data.get("history", [])
+
+        last_ok_by_name = {}
+        for e in history:
+            if e.get("status") != "OK":
+                continue
+            perfil = e.get("perfil")
+            dt = e.get("datetime")
+            if not perfil or not dt:
+                continue
+            last_ok_by_name[perfil] = dt
+
+        if not profiles:
+            ctk.CTkLabel(self.profiles_box,
+                         text="Nenhum perfil criado.\nClique em '+ Novo Perfil' para começar.",
+                         font=FONT_SMALL, text_color=TEXT_SEC,
+                         justify="center").pack(pady=20)
+            return
+
+        for p in profiles:
+            self._render_profile_card(p, last_ok_by_name)
+
+    def _render_profile_card(self, p: dict, last_ok_by_name: dict):
+        is_rotacao = p.get("modo", "rotacao") == "rotacao"
+        ativo      = p.get("ativo", True)
+        running    = (p.get("id") == self._running_profile_id)
+
+        card = ctk.CTkFrame(self.profiles_box, fg_color=BG_CARD, corner_radius=8,
+                            border_width=1,
+                            border_color=ACCENT_BLUE if running else (ACCENT if ativo else BORDER))
+        card.pack(fill="x", pady=3, padx=4)
+        card.columnconfigure(1, weight=1)
+
+        # Ícone modo
+        modo_color = ACCENT if is_rotacao else ACCENT_BLUE
+        modo_text  = "⟳" if is_rotacao else "⬆"
+        ctk.CTkLabel(card, text=modo_text, font=("Segoe UI", 16),
+                     text_color=modo_color, width=32
+                     ).grid(row=0, column=0, rowspan=2, padx=(10, 0), pady=8)
+
+        # Nome + detalhes
+        ctk.CTkLabel(card, text=p.get("nome", "Sem nome"),
+                     font=FONT_BODY, text_color=TEXT_PRI if ativo else TEXT_SEC,
+                     anchor="w").grid(row=0, column=1, sticky="ew", padx=8, pady=(8, 0))
+
+        modo_label = "Rotação" if is_rotacao else "Espelho"
+        detail = f"{modo_label}  •  {p.get('folder_pai','')}/{p.get('cliente','')}"
+        if is_rotacao:
+            detail += f"  •  {p.get('qtd_backups', 3)} backups"
+        last_ok = last_ok_by_name.get(p.get("nome"))
+        if last_ok:
+            detail += f"  •  Último OK: {last_ok}"
+        if running:
+            detail += "  •  Sincronizando…"
+        ctk.CTkLabel(card, text=detail,
+                     font=FONT_TINY, text_color=TEXT_SEC, anchor="w"
+                     ).grid(row=1, column=1, sticky="ew", padx=8, pady=(0, 8))
+
+        # Botões
+        btn_frame = ctk.CTkFrame(card, fg_color="transparent")
+        btn_frame.grid(row=0, column=2, rowspan=2, padx=(0, 8))
+
+        # Toggle ativo/pausado
+        var_ativo = tk.BooleanVar(value=ativo)
+        ctk.CTkSwitch(btn_frame, text="", variable=var_ativo,
+                      onvalue=True, offvalue=False,
+                      width=44, progress_color=ACCENT,
+                      command=lambda pid=p["id"], v=var_ativo: self._toggle_profile(pid, v.get())
+                      ).pack(side="left", padx=4)
+
+        ctk.CTkButton(btn_frame, text="▶", width=30, height=28,
+                      fg_color=BG_INPUT, hover_color=BORDER,
+                      text_color=TEXT_SEC, font=FONT_BODY,
+                      command=lambda pid=p["id"]: self._sync_profile_now(pid)
+                      ).pack(side="left", padx=2)
+
+        ctk.CTkButton(btn_frame, text="✎", width=30, height=28,
+                      fg_color=BG_INPUT, hover_color=BORDER,
+                      text_color=TEXT_SEC, font=FONT_BODY,
+                      command=lambda pid=p["id"]: self._edit_profile(pid)
+                      ).pack(side="left", padx=2)
+
+        ctk.CTkButton(btn_frame, text="🗑", width=30, height=28,
+                      fg_color=BG_INPUT, hover_color=ACCENT_RED,
+                      text_color=TEXT_SEC, font=FONT_BODY,
+                      command=lambda pid=p["id"], pn=p.get("nome",""): self._delete_profile(pid, pn)
+                      ).pack(side="left", padx=2)
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    #  PROFILE ACTIONS
+    # ═══════════════════════════════════════════════════════════════════════════
+    def _new_profile(self):
+        p = self.config_mgr.new_profile()
+        self._open_profile_form(p)
+
+    def _edit_profile(self, profile_id: str):
+        profiles = self.config_mgr.get_profiles()
+        p = next((x for x in profiles if x["id"] == profile_id), None)
+        if p:
+            self._open_profile_form(p)
+
+    def _open_profile_form(self, profile: dict):
+        form = ProfileForm(self, profile, self._on_profile_saved)
+        self._modal_count += 1
+        def _on_destroy(evt):
+            if evt.widget is form:
+                self._modal_count = max(self._modal_count - 1, 0)
+        form.bind("<Destroy>", _on_destroy)
+
+    def _on_profile_saved(self, profile: dict):
+        self.config_mgr.save_profile(profile)
+        self._render_profiles()
+        self.log(f"Perfil salvo: {profile['nome']}", "OK")
+
+    def _toggle_profile(self, profile_id: str, ativo: bool):
+        profiles = self.config_mgr.get_profiles()
+        for p in profiles:
+            if p["id"] == profile_id:
+                p["ativo"] = ativo
+                self.config_mgr.save_profile(p)
+                status = "ativado" if ativo else "pausado"
+                self.log(f"Perfil '{p['nome']}' {status}.", "INFO")
+                break
+        self._render_profiles()
+
+    def _sync_profile_now(self, profile_id: str):
+        if not self._drive_connected:
+            messagebox.showwarning("Drive não conectado",
+                                   "Conecte-se ao Google Drive antes de sincronizar.")
+            return
+        if not self._sync_lock.acquire(blocking=False):
+            self.log("Já existe uma sincronização em andamento.", "INFO")
+            return
+        self._sync_lock.release()
+        threading.Thread(target=lambda: self._do_profile_sync(profile_id), daemon=True).start()
+
+    def _do_profile_sync(self, profile_id: str):
+        if not self._sync_lock.acquire(blocking=False):
+            return
+        try:
+            self._sync_cancel_evt.clear()
+            data = self.config_mgr.load()
+            profiles = data.get("profiles", [])
+            history  = data.get("history", [])
+            profile = next((p for p in profiles if p.get("id") == profile_id), None)
+            if not profile:
+                self.log("Perfil não encontrado.", "ERROR")
+                return
+
+            if not self.drive_svc.is_authenticated():
+                self.log("Drive desconectado — tentando reconectar...", "WARN")
+                if not self.drive_svc.authenticate():
+                    self.log("Reconexão automática falhou.", "ERROR")
+                    return
+                self._drive_connected = True
+                self.after(0, self._on_drive_connected)
+
+            self._running_profile_id = profile_id
+            self.after(0, self._render_profiles)
+            self.after(0, self.progress.start)
+
+            try:
+                self.backup_mgr.run_sync(profile, history, cancel_evt=self._sync_cancel_evt)
+            except (OSError, ValueError, KeyError, TypeError) as e:
+                self.log(f"Erro no perfil '{profile.get('nome','')}': {e}", "ERROR")
+            self.config_mgr.save({**data, "history": history})
+            self.refresh_history(history)
+        finally:
+            self._running_profile_id = None
+            self.after(0, self._render_profiles)
+            self.after(0, self._progress_stop_reset)
+            self._sync_lock.release()
+
+    def _progress_stop_reset(self):
+        self.progress.stop()
+        self.progress.set(0)
+
+    def _delete_profile(self, profile_id: str, nome: str):
+        data = self.config_mgr.load()
+        history = data.get("history", [])
+        used = sum(1 for e in history if e.get("perfil") == nome)
+        extra = f"\n\nEste perfil possui {used} registro(s) no histórico." if used else ""
+        if messagebox.askyesno("Excluir perfil",
+                               f"Deseja excluir o perfil '{nome}'?\n\n"
+                               "Os arquivos no Drive não serão afetados."
+                               f"{extra}"):
+            self.config_mgr.delete_profile(profile_id)
+            self._render_profiles()
+            self.log(f"Perfil '{nome}' excluído.", "WARN")
+
+    # ═══════════════════════════════════════════════════════════════════════════
     #  LOGGING
     # ═══════════════════════════════════════════════════════════════════════════
     def log(self, msg: str, level: str = "INFO"):
@@ -393,18 +795,19 @@ class BackupApp(ctk.CTk):
             ts   = datetime.now().strftime("%H:%M:%S")
             icon = {"INFO": "ℹ", "OK": "✔", "WARN": "⚠", "ERROR": "✖", "PROGRESS": "↑"}.get(level, "·")
             line = f"[{ts}] {icon} {msg}\n"
+            log_box = getattr(self.log_text, "_textbox")
             self.log_text.configure(state="normal")
             if level == "PROGRESS":
-                if self._progress_active and self._progress_start is not None:
-                    self.log_text._textbox.delete(self._progress_start, "end-1c")
-                self._progress_start = self.log_text._textbox.index("end-1c")
-                self._progress_active = True
-                self.log_text._textbox.insert("end", line, level)
+                if self._log_progress_active and self._log_progress_start is not None:
+                    log_box.delete(self._log_progress_start, "end-1c")
+                self._log_progress_start = log_box.index("end-1c")
+                self._log_progress_active = True
+                log_box.insert("end", line, level)
             else:
-                self._progress_active = False
-                self._progress_start  = None
-                self.log_text._textbox.insert("end", line, level)
-            self.log_text._textbox.see("end")
+                self._log_progress_active = False
+                self._log_progress_start = None
+                log_box.insert("end", line, level)
+            log_box.see("end")
             self.log_text.configure(state="disabled")
             self.lbl_status.configure(text=msg[:90])
         self.after(0, _do)
@@ -413,8 +816,8 @@ class BackupApp(ctk.CTk):
         self.log_text.configure(state="normal")
         self.log_text.delete("0.0", "end")
         self.log_text.configure(state="disabled")
-        self._progress_active = False
-        self._progress_start  = None
+        self._log_progress_active = False
+        self._log_progress_start = None
 
     # ═══════════════════════════════════════════════════════════════════════════
     #  HISTORY
@@ -437,7 +840,11 @@ class BackupApp(ctk.CTk):
                 ctk.CTkLabel(row, text="●", font=("Segoe UI", 10),
                              text_color=sc, width=20
                              ).grid(row=0, column=0, padx=(10, 0), pady=7)
-                ctk.CTkLabel(row, text=e.get("filename", "—"),
+                # Arquivo + perfil
+                info = e.get("filename", "—")
+                if e.get("perfil"):
+                    info += f"  [{e['perfil']}]"
+                ctk.CTkLabel(row, text=info,
                              font=FONT_MONO, text_color=TEXT_PRI, anchor="w"
                              ).grid(row=0, column=1, sticky="ew", padx=8)
                 ctk.CTkLabel(row, text=e.get("datetime", ""),
@@ -477,26 +884,23 @@ class BackupApp(ctk.CTk):
 
     def _on_drive_connected(self):
         self.conn_badge.configure(text="● Conectado", text_color=TEXT_GRN)
-        self.btn_connect.configure(
-            state="normal", text="Desconectar Drive",
-            fg_color=ACCENT_RED, hover_color=ACCENT_RED_HOV, text_color="white")
+        self.btn_connect.configure(state="normal", text="Desconectar Drive",
+                                   fg_color=ACCENT_RED, hover_color=ACCENT_RED_HOV,
+                                   text_color="white")
 
     def _disconnect_drive(self):
         if messagebox.askyesno("Desconectar Drive",
                                "Deseja desconectar o Google Drive?\n\n"
-                               "O token de sessão será removido.\n"
-                               "A sincronização será parada."):
+                               "O token será removido e a sincronização será parada."):
             if self.scheduler.is_active():
-                self._sync_cancel_evt.set()
                 self.scheduler.stop()
-                self._update_sync_button(active=False)
-
+                self._update_sync_button(False)
             self.drive_svc.disconnect()
             self._drive_connected = False
             self.conn_badge.configure(text="● Desconectado", text_color=TEXT_RED)
-            self.btn_connect.configure(
-                state="normal", text="Conectar Drive",
-                fg_color=BG_INPUT, hover_color=BORDER, text_color=TEXT_SEC)
+            self.btn_connect.configure(state="normal", text="Conectar Drive",
+                                       fg_color=BG_INPUT, hover_color=BORDER,
+                                       text_color=TEXT_SEC)
             self.log("Google Drive desconectado.", "WARN")
 
     def _check_drive_connection(self):
@@ -506,84 +910,66 @@ class BackupApp(ctk.CTk):
             self.log("Sessão do Google Drive restaurada.", "OK")
 
     # ═══════════════════════════════════════════════════════════════════════════
-    #  SYNC BUTTON  (master toggle: ▶ Sincronizar  ↔  ■ Parar Sincronização)
-    #  NÃO controla o agendador — só liga/desliga o processo de sync.
+    #  SYNC BUTTON
     # ═══════════════════════════════════════════════════════════════════════════
     def _on_sync_button(self):
         if self.scheduler.is_active():
-            # ── Parar ───────────────────────────────────────────────────────
-            self._sync_cancel_evt.set()
             self.scheduler.stop()
-            self._update_sync_button(active=False)
+            self._update_sync_button(False)
             self.log("Sincronização parada.", "WARN")
-            self._save_config_silent()
+            self._persist_globals()
         else:
-            # ── Iniciar ─────────────────────────────────────────────────────
             if not self._drive_connected:
                 messagebox.showwarning("Drive não conectado",
                                        "Conecte-se ao Google Drive antes de sincronizar.")
                 return
-
-            # Verifica se há alterações não salvas
-            if self._has_unsaved_changes():
-                resp = messagebox.askyesno(
-                    "Configuração não salva",
-                    "Você possui alterações não salvas.\n\n"
-                    "Deseja salvar antes de sincronizar?")
-                if resp:
-                    if not self._save_config():   # save retorna False se campos inválidos
-                        return
-                else:
-                    return   # usuário cancelou
-
-            cfg = self._read_fields()
-            if not cfg:
+            profiles = [p for p in self.config_mgr.get_profiles() if p.get("ativo", True)]
+            if not profiles:
+                messagebox.showwarning("Sem perfis ativos",
+                                       "Crie pelo menos um perfil de backup antes de sincronizar.")
                 return
-
-            self._sync_cancel_evt.clear()
             self.scheduler.start()
-            self._update_sync_button(active=True)
-            modo = "agendado (" + self.var_interval.get() + ")" if self.var_auto.get() else "contínuo (5 min)"
-            self.log(f"Sincronização iniciada — modo {modo}.", "OK")
-            self._save_config_silent()
+            self._update_sync_button(True)
+            modo = f"agendado ({self.var_interval.get()})" if self.var_auto.get() else "contínuo (5 min)"
+            self.log(f"Sincronização iniciada — modo {modo}. "
+                     f"{len(profiles)} perfil(is) ativo(s).", "OK")
+            self._persist_globals()
 
     def _update_sync_button(self, active: bool):
         if active:
-            self.btn_sync.configure(
-                text="■  Parar Sincronização",
-                fg_color=ACCENT_RED, hover_color=ACCENT_RED_HOV)
+            self.btn_sync.configure(text="■  Parar Sincronização",
+                                    fg_color=ACCENT_RED, hover_color=ACCENT_RED_HOV)
         else:
-            self.btn_sync.configure(
-                text="▶  Sincronizar",
-                fg_color=ACCENT, hover_color=ACCENT_HOV)
+            self.btn_sync.configure(text="▶  Sincronizar",
+                                    fg_color=ACCENT, hover_color=ACCENT_HOV)
 
     # ═══════════════════════════════════════════════════════════════════════════
-    #  SCHEDULER  — controla apenas a frequência, não o master on/off
+    #  SCHEDULER
     # ═══════════════════════════════════════════════════════════════════════════
     def _on_interval_toggle(self):
         use = self.var_auto.get()
         self.scheduler.set_use_interval(use)
-        if use:
-            self.log(f"Modo agendado ativado — intervalo: {self.var_interval.get()}.", "INFO")
-        else:
-            self.log("Modo contínuo ativado — verificação a cada 5 min.", "INFO")
-        self._save_config_silent()
+        self.log(f"Modo {'agendado — ' + self.var_interval.get() if use else 'contínuo (5 min)'}.", "INFO")
+        self._persist_globals()
 
     def _on_interval_change(self, value: str):
         self.scheduler.set_interval(value)
         self.log(f"Intervalo alterado para: {value}", "INFO")
-        self._save_config_silent()
+        self._persist_globals()
 
     def _do_background_sync(self):
-        """Chamado pelo scheduler automaticamente."""
+        """Chamado pelo scheduler — roda todos os perfis ativos em sequência."""
         if not self._sync_lock.acquire(blocking=False):
             return
         try:
             if self._sync_cancel_evt.is_set():
                 return
-            cfg = self._read_fields_silent()
-            if not cfg:
-                self.log("Configuração incompleta — sync cancelado.", "WARN")
+            data     = self.config_mgr.load()
+            profiles = [p for p in data.get("profiles", []) if p.get("ativo", True)]
+            history  = data.get("history", [])
+
+            if not profiles:
+                self.log("Nenhum perfil ativo para sincronizar.", "WARN")
                 return
 
             if not self.drive_svc.is_authenticated():
@@ -594,31 +980,56 @@ class BackupApp(ctk.CTk):
                 self._drive_connected = True
                 self.after(0, self._on_drive_connected)
 
-            self.after(0, lambda: self.progress.start())
-            data    = self.config_mgr.load()
-            history = data.get("history", [])
-            self.backup_mgr.run_sync(cfg, history, cancel_evt=self._sync_cancel_evt)
-            self.config_mgr.save({**cfg, "history": history})
+            self.after(0, self.progress.start)
+
+            for profile in profiles:
+                if self._sync_cancel_evt.is_set():
+                    self.log("Sincronização cancelada.", "WARN")
+                    break
+                self._running_profile_id = profile.get("id")
+                self.after(0, self._render_profiles)
+                try:
+                    self.backup_mgr.run_sync(profile, history, self._sync_cancel_evt)
+                except (OSError, ValueError, KeyError, TypeError) as e:
+                    self.log(f"Erro no perfil '{profile.get('nome','')}': {e}", "ERROR")
+
+            self.config_mgr.save({**data, "history": history})
             self.refresh_history(history)
+
         finally:
+            self._running_profile_id = None
+            self.after(0, self._render_profiles)
             self._sync_lock.release()
-            self.after(0, lambda: (self.progress.stop(), self.progress.set(0)))
+            self.after(0, self._progress_stop_reset)
 
     def _tick_scheduler_status(self):
         status = self.scheduler.get_status()
-
         def _do():
             self.lbl_next.configure(text=f"Próximo sync: {status['next_run']}")
             self.lbl_last.configure(text=f"Último sync:  {status['last_run']}")
-            if status["active"]:
-                self.lbl_sched_status.configure(
-                    text=f"● Sync ativo — próximo: {status['next_run']}",
-                    text_color=TEXT_GRN)
-            else:
-                self.lbl_sched_status.configure(text="● Sync parado", text_color=TEXT_SEC)
-
+            self.lbl_sched_status.configure(
+                text=f"● Sync ativo — próximo: {status['next_run']}" if status["active"] else "● Sync parado",
+                text_color=TEXT_GRN if status["active"] else TEXT_SEC)
         self.after(0, _do)
-        self.after(10_000, self._tick_scheduler_status)
+        if self._sched_after_id is not None:
+            try:
+                self.after_cancel(self._sched_after_id)
+            except tk.TclError:
+                pass
+        self._sched_after_id = self.after(10_000, self._tick_scheduler_status)
+
+    def _tray_sync_now(self):
+        if not self.scheduler.is_active():
+            self.log("Sync está parado. Inicie pela janela principal.", "WARN")
+            return
+        if self._sync_cancel_evt.is_set():
+            self.log("Sync cancelado. Inicie novamente pela janela principal.", "WARN")
+            return
+        if not self._sync_lock.acquire(blocking=False):
+            self.log("Já existe uma sincronização em andamento.", "INFO")
+            return
+        self._sync_lock.release()
+        threading.Thread(target=self._do_background_sync, daemon=True).start()
 
     # ═══════════════════════════════════════════════════════════════════════════
     #  AUTOSTART
@@ -630,7 +1041,6 @@ class BackupApp(ctk.CTk):
                 cmd = autostart.get_registered_cmd()
                 self.log("Inicialização automática ativada.", "OK")
                 self.log(f"Registrado: {cmd}", "INFO")
-                self.log("O app iniciará minimizado na bandeja ao ligar o Windows.", "INFO")
             else:
                 self.log("Não foi possível ativar a inicialização automática.", "ERROR")
                 self.var_boot.set(False)
@@ -639,9 +1049,21 @@ class BackupApp(ctk.CTk):
             self.log("Inicialização automática desativada.", "INFO")
 
     # ═══════════════════════════════════════════════════════════════════════════
-    #  SYSTEM TRAY
+    #  TRAY
     # ═══════════════════════════════════════════════════════════════════════════
     def _minimize_to_tray(self):
+        grabber = None
+        try:
+            grabber = self.grab_current()
+        except tk.TclError:
+            grabber = None
+        if self._modal_count > 0 or (grabber is not None and grabber.winfo_toplevel() is not self):
+            messagebox.showwarning(
+                "Janela aberta",
+                "Feche a janela de edição de perfil antes de minimizar para a bandeja.",
+                parent=self,
+            )
+            return
         self.withdraw()
         self._start_tray_icon()
 
@@ -649,35 +1071,28 @@ class BackupApp(ctk.CTk):
         try:
             import pystray
             from PIL import Image, ImageDraw
-
-            # Tenta carregar o .ico real; fallback para nuvem desenhada
             ico_path = _resolve_icon()
+            img = None
             if ico_path:
                 try:
-                    img = Image.open(ico_path)
-                    # pystray precisa de RGBA
-                    img = img.convert("RGBA")
-                except Exception:
-                    ico_path = None
-
-            if not ico_path:
+                    img = Image.open(ico_path).convert("RGBA")
+                except OSError:
+                    img = None
+            if img is None:
                 img  = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
                 draw = ImageDraw.Draw(img)
                 draw.ellipse([4, 20, 36, 52],  fill="#238636")
                 draw.ellipse([20, 12, 52, 44], fill="#238636")
                 draw.ellipse([28, 20, 60, 52], fill="#238636")
                 draw.rectangle([8, 36, 56, 56], fill="#238636")
-
             menu = pystray.Menu(
                 pystray.MenuItem("Abrir",      lambda: self.after(0, self._show_window), default=True),
-                pystray.MenuItem("Sync agora", lambda: threading.Thread(
-                    target=self._do_background_sync, daemon=True).start()),
+                pystray.MenuItem("Sync agora", lambda: self.after(0, self._tray_sync_now)),
                 pystray.Menu.SEPARATOR,
                 pystray.MenuItem("Encerrar",   lambda: self.after(0, self._quit_app)),
             )
             self._tray_icon = pystray.Icon(APP_NAME, img, APP_NAME, menu)
             threading.Thread(target=self._tray_icon.run, daemon=True).start()
-
         except ImportError:
             self.iconify()
 
@@ -690,152 +1105,66 @@ class BackupApp(ctk.CTk):
         self.focus_force()
 
     def _on_close(self):
-        """X sempre pergunta antes de fechar — sem minimizar para bandeja."""
-        if messagebox.askyesno(
-                "Encerrar",
-                f"Deseja encerrar o {APP_NAME}?\n\n"
-                "A sincronização automática será interrompida."):
+        if messagebox.askyesno("Encerrar",
+                               f"Deseja encerrar o {APP_NAME}?\n\n"
+                               "A sincronização automática será interrompida."):
             self._quit_app()
 
     def _quit_app(self):
         self.scheduler.stop()
         if self._tray_icon:
             self._tray_icon.stop()
+        if self._sched_after_id is not None:
+            try:
+                self.after_cancel(self._sched_after_id)
+            except tk.TclError:
+                pass
         self.destroy()
 
+    def start_tray_icon(self):
+        self._start_tray_icon()
+
     # ═══════════════════════════════════════════════════════════════════════════
-    #  CONFIG  (save / load / snapshot para detecção de mudanças)
+    #  CONFIG
     # ═══════════════════════════════════════════════════════════════════════════
-    def _get_ui_snapshot(self) -> dict:
-        """Captura os valores atuais dos campos para comparação."""
-        return {
-            "folder_pai": self.ent_folder_pai.get().strip(),
-            "cliente":    self.ent_cliente.get().strip(),
-            "backup_dir": self.ent_backup_dir.get().strip(),
-            "extensoes":  self.ent_ext.get().strip(),
-            "qtd_backups": str(self.var_qtd.get()),
-        }
+    def _save_globals(self):
+        self._persist_globals()
+        self.log("Configurações globais salvas.", "OK")
 
-    def _has_unsaved_changes(self) -> bool:
-        return self._get_ui_snapshot() != self._saved_snapshot
+    def _persist_globals(self):
+        data = self.config_mgr.load()
+        data["auto_sync"]     = self.var_auto.get()
+        data["sync_interval"] = self.var_interval.get()
+        data["sync_active"]   = self.scheduler.is_active()
+        self.config_mgr.save(data)
 
-    def _save_config(self) -> bool:
-        """Salva com validação. Retorna True se salvou, False se campos inválidos."""
-        cfg = self._read_fields()
-        if not cfg:
-            return False
-        self._persist_config(cfg)
-        self._saved_snapshot = self._get_ui_snapshot()
-        self.log("Configuração salva.", "OK")
-        return True
+    def _load_all(self):
+        data = self.config_mgr.load()
 
-    def _save_config_silent(self):
-        cfg = self._read_fields_silent()
-        if cfg:
-            self._persist_config(cfg)
-
-    def _persist_config(self, cfg: dict):
-        history = self.config_mgr.load().get("history", [])
-        cfg["auto_sync"]      = self.var_auto.get()
-        cfg["sync_interval"]  = self.var_interval.get()
-        cfg["sync_active"]    = self.scheduler.is_active()
-        self.config_mgr.save({**cfg, "history": history})
-
-    def _load_config(self):
-        cfg = self.config_mgr.load()
-        if not cfg:
-            self._saved_snapshot = self._get_ui_snapshot()
-            return
-
-        def fill(entry, key, default=""):
-            v = cfg.get(key, default)
-            if v:
-                entry.delete(0, "end")
-                entry.insert(0, v)
-
-        fill(self.ent_folder_pai, "folder_pai", DEFAULT_PASTA)
-        fill(self.ent_cliente,    "cliente")
-        fill(self.ent_backup_dir, "backup_dir")
-        fill(self.ent_ext,        "extensoes")
-
-        qtd = str(cfg.get("qtd_backups", 3))
-        if qtd not in ["1", "2", "3", "5", "7", "10"]:
-            qtd = "3"
-        self.spin_qtd.set(qtd)
-        self.var_qtd.set(int(qtd))
-
-        interval = cfg.get("sync_interval", "1 hora")
+        interval = data.get("sync_interval", "1 hora")
         if interval in SyncScheduler.INTERVALS:
             self.var_interval.set(interval)
             self.cmb_interval.set(interval)
             self.scheduler.set_interval(interval)
 
-        use_interval = cfg.get("auto_sync", False)
+        use_interval = data.get("auto_sync", False)
         self.var_auto.set(use_interval)
         self.scheduler.set_use_interval(use_interval)
 
-        # Restaura o sync ativo se estava rodando antes
-        if cfg.get("sync_active", False):
+        if data.get("sync_active", False):
             self.scheduler.start()
-            self._update_sync_button(active=True)
+            self._update_sync_button(True)
             self.log("Sincronização restaurada automaticamente.", "OK")
 
-        self._saved_snapshot = self._get_ui_snapshot()
-        self.refresh_history(cfg.get("history", []))
+        self._render_profiles()
+        self.refresh_history(data.get("history", []))
         self.log("Configuração carregada.", "OK")
-
-    def _browse_folder(self):
-        path = filedialog.askdirectory(title="Selecione a pasta de backup")
-        if path:
-            self.ent_backup_dir.delete(0, "end")
-            self.ent_backup_dir.insert(0, path)
-
-    def _read_fields(self) -> dict | None:
-        folder_pai = self.ent_folder_pai.get().strip()
-        cliente    = self.ent_cliente.get().strip()
-        backup_dir = self.ent_backup_dir.get().strip()
-        extensoes  = self.ent_ext.get().strip() or ".sql"
-        qtd        = self.var_qtd.get()
-
-        errors = []
-        if not folder_pai:  errors.append("Pasta Pai no Drive")
-        if not cliente:     errors.append("Cliente")
-        if not backup_dir:  errors.append("Pasta de Backup Local")
-
-        if errors:
-            messagebox.showerror("Campos obrigatórios",
-                                 "Preencha os campos:\n• " + "\n• ".join(errors))
-            return None
-
-        if not os.path.isdir(backup_dir):
-            messagebox.showerror("Pasta inválida",
-                                 f"A pasta de backup não existe:\n{backup_dir}")
-            return None
-
-        return dict(folder_pai=folder_pai, cliente=cliente,
-                    backup_dir=backup_dir, extensoes=extensoes, qtd_backups=qtd)
-
-    def _read_fields_silent(self) -> dict | None:
-        cfg = self.config_mgr.load()
-        if not cfg:
-            return None
-        fp = cfg.get("folder_pai", "").strip()
-        cl = cfg.get("cliente",    "").strip()
-        bd = cfg.get("backup_dir", "").strip()
-        ex = cfg.get("extensoes",  ".sql").strip()
-        qt = int(cfg.get("qtd_backups", 3))
-        if not fp or not cl or not bd or not os.path.isdir(bd):
-            return None
-        return dict(folder_pai=fp, cliente=cl, backup_dir=bd,
-                    extensoes=ex, qtd_backups=qt)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     app = BackupApp()
-
     if "--minimized" in sys.argv:
         app.withdraw()
-        app._start_tray_icon()
-
+        app.start_tray_icon()
     app.mainloop()

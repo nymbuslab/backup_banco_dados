@@ -25,10 +25,16 @@ def _get_startup_cmd() -> str:
         # Rodando como .exe (PyInstaller) — sys.executable aponta para o .exe correto
         exe = sys.executable
     else:
-        # Desenvolvimento: usa pythonw para não abrir janela de console
-        exe = os.path.abspath(sys.argv[0])
-        exe = f'pythonw "{exe}"'
-        return f'{exe} --minimized'
+        script = os.path.abspath(sys.argv[0])
+        py_exe = sys.executable
+        py_dir = os.path.dirname(py_exe)
+        base = os.path.basename(py_exe).lower()
+        if base == "pythonw.exe":
+            pythonw = py_exe
+        else:
+            candidate = os.path.join(py_dir, "pythonw.exe")
+            pythonw = candidate if os.path.exists(candidate) else py_exe
+        return f'"{pythonw}" "{script}" --minimized'
 
     # Sempre envolve o caminho em aspas — protege contra espaços no path
     return f'"{exe}" --minimized'
@@ -37,15 +43,14 @@ def _get_startup_cmd() -> str:
 def is_enabled() -> bool:
     try:
         import winreg
-        key = winreg.OpenKey(
+        with winreg.OpenKey(
             winreg.HKEY_CURRENT_USER,
             r"Software\Microsoft\Windows\CurrentVersion\Run",
             0, winreg.KEY_READ
-        )
-        winreg.QueryValueEx(key, APP_NAME)
-        winreg.CloseKey(key)
+        ) as key:
+            winreg.QueryValueEx(key, APP_NAME)
         return True
-    except Exception:
+    except (OSError, ImportError):
         return False
 
 
@@ -53,15 +58,14 @@ def enable() -> bool:
     try:
         import winreg
         cmd = _get_startup_cmd()
-        key = winreg.OpenKey(
+        with winreg.OpenKey(
             winreg.HKEY_CURRENT_USER,
             r"Software\Microsoft\Windows\CurrentVersion\Run",
             0, winreg.KEY_SET_VALUE
-        )
-        winreg.SetValueEx(key, APP_NAME, 0, winreg.REG_SZ, cmd)
-        winreg.CloseKey(key)
+        ) as key:
+            winreg.SetValueEx(key, APP_NAME, 0, winreg.REG_SZ, cmd)
         return True
-    except Exception as e:
+    except (OSError, ImportError) as e:
         print(f"[AutoStart] Erro ao ativar: {e}")
         return False
 
@@ -69,15 +73,14 @@ def enable() -> bool:
 def disable() -> bool:
     try:
         import winreg
-        key = winreg.OpenKey(
+        with winreg.OpenKey(
             winreg.HKEY_CURRENT_USER,
             r"Software\Microsoft\Windows\CurrentVersion\Run",
             0, winreg.KEY_SET_VALUE
-        )
-        winreg.DeleteValue(key, APP_NAME)
-        winreg.CloseKey(key)
+        ) as key:
+            winreg.DeleteValue(key, APP_NAME)
         return True
-    except Exception as e:
+    except (OSError, ImportError) as e:
         print(f"[AutoStart] Erro ao desativar: {e}")
         return False
 
@@ -86,13 +89,12 @@ def get_registered_cmd() -> str:
     """Retorna o comando atualmente registrado no Windows (para debug)."""
     try:
         import winreg
-        key = winreg.OpenKey(
+        with winreg.OpenKey(
             winreg.HKEY_CURRENT_USER,
             r"Software\Microsoft\Windows\CurrentVersion\Run",
             0, winreg.KEY_READ
-        )
-        value, _ = winreg.QueryValueEx(key, APP_NAME)
-        winreg.CloseKey(key)
+        ) as key:
+            value, _ = winreg.QueryValueEx(key, APP_NAME)
         return value
-    except Exception:
+    except (OSError, ImportError):
         return "(não registrado)"

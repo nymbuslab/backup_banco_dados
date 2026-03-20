@@ -32,9 +32,10 @@ class SyncScheduler:
         "24 horas": 24 * 3600,
     }
 
-    def __init__(self, sync_fn: Callable, log_fn: Callable):
+    def __init__(self, sync_fn: Callable, log_fn: Callable, cancel_evt=None):
         self._sync          = sync_fn
         self._log           = log_fn
+        self._cancel_evt    = cancel_evt
         self._active        = False     # master: sync ligado/desligado
         self._use_interval  = False     # se True usa _interval; se False usa CONTINUOUS
         self._interval      = 3600
@@ -48,6 +49,11 @@ class SyncScheduler:
     # ── Public API ────────────────────────────────────────────────────────────
     def start(self):
         """Liga o processo de sync (botão master)."""
+        if self._cancel_evt is not None:
+            try:
+                self._cancel_evt.clear()
+            except Exception:
+                pass
         with self._lock:
             self._active   = True
             self._next_run = datetime.now()   # primeira execução imediata
@@ -56,6 +62,11 @@ class SyncScheduler:
 
     def stop(self):
         """Desliga o processo de sync completamente."""
+        if self._cancel_evt is not None:
+            try:
+                self._cancel_evt.set()
+            except Exception:
+                pass
         with self._lock:
             self._active = False
         self._stop_evt.set()
@@ -113,7 +124,11 @@ class SyncScheduler:
             if active and next_run and datetime.now() >= next_run:
                 self._do_sync()
 
-            self._stop_evt.wait(timeout=15)
+            timeout = 1.0
+            if active and next_run:
+                delta = (next_run - datetime.now()).total_seconds()
+                timeout = min(1.0, max(0.2, delta))
+            self._stop_evt.wait(timeout=timeout)
 
     def _do_sync(self):
         with self._lock:
