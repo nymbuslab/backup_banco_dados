@@ -1,5 +1,6 @@
 @echo off
 setlocal enableextensions
+pushd "%~dp0"
 echo ============================================
 echo  GR7 Backup Manager - Build EXE
 echo ============================================
@@ -89,5 +90,6 @@ echo Executavel gerado em: dist\GR7BackupManager.exe
 echo.
 echo IMPORTANTE: Coloque credentials.json na mesma pasta que GR7BackupManager.exe
 echo.
+popd
 if "%NO_PAUSE%"=="1" exit /b 0
 pause
