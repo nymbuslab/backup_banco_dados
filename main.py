@@ -320,6 +320,7 @@ class BackupApp(ctk.CTk):
         self._sync_cancel_evt = threading.Event()
         self.scheduler  = SyncScheduler(self._do_background_sync, self.log, cancel_evt=self._sync_cancel_evt)
 
+        self._app_alive       = True   # False após destroy() — protege self.after() de threads em background
         self._sync_lock       = threading.Lock()
         self._card_refs: dict = {}   # pid → {card, lbl_detail, base_detail}
         self._tray_icon       = None
@@ -790,13 +791,13 @@ class BackupApp(ctk.CTk):
                     self.log("Reconexão automática falhou.", "ERROR")
                     return
                 self._drive_connected = True
-                self.after(0, self._on_drive_connected)
+                self._safe_after(0, self._on_drive_connected)
 
             prev_pid = self._running_profile_id
             self._running_profile_id = profile_id
-            self.after(0, lambda cur=profile_id, prv=prev_pid:
+            self._safe_after(0, lambda cur=profile_id, prv=prev_pid:
                        self._update_running_card(cur, prv))
-            self.after(0, self.progress.start)
+            self._safe_after(0, self.progress.start)
 
             try:
                 self.backup_mgr.run_sync(profile, history, cancel_evt=self._sync_cancel_evt)
@@ -807,13 +808,26 @@ class BackupApp(ctk.CTk):
         finally:
             prev = self._running_profile_id
             self._running_profile_id = None
-            self.after(0, lambda prv=prev: self._update_running_card(None, prv))
-            self.after(0, self._progress_stop_reset)
+            self._safe_after(0, lambda prv=prev: self._update_running_card(None, prv))
+            self._safe_after(0, self._progress_stop_reset)
             self._sync_lock.release()
 
     def _progress_stop_reset(self):
         self.progress.stop()
         self.progress.set(0)
+
+    def _safe_after(self, ms: int, fn, *args):
+        """
+        Wrapper thread-safe para self.after().
+        Evita 'main thread is not in main loop' quando uma thread de background
+        tenta atualizar a UI depois que a janela já foi destruída.
+        """
+        if not self._app_alive:
+            return
+        try:
+            self.after(ms, fn, *args)
+        except (tk.TclError, RuntimeError):
+            pass
 
     def _delete_profile(self, profile_id: str, nome: str):
         data = self.config_mgr.load()
@@ -851,7 +865,7 @@ class BackupApp(ctk.CTk):
             log_box.see("end")
             self.log_text.configure(state="disabled")
             self.lbl_status.configure(text=msg[:90])
-        self.after(0, _do)
+        self._safe_after(0, _do)
 
     def _clear_log(self):
         self.log_text.configure(state="normal")
@@ -891,7 +905,7 @@ class BackupApp(ctk.CTk):
                 ctk.CTkLabel(row, text=e.get("datetime", ""),
                              font=FONT_SMALL, text_color=TEXT_SEC
                              ).grid(row=0, column=2, padx=(0, 10))
-        self.after(0, _do)
+        self._safe_after(0, _do)
 
     # ═══════════════════════════════════════════════════════════════════════════
     #  DRIVE CONNECTION
@@ -911,11 +925,11 @@ class BackupApp(ctk.CTk):
         ok = self.drive_svc.authenticate()
         if ok:
             self._drive_connected = True
-            self.after(0, self._on_drive_connected)
+            self._safe_after(0, self._on_drive_connected)
             self.log("Google Drive conectado com sucesso!", "OK")
         else:
             self._drive_connected = False
-            self.after(0, lambda: (
+            self._safe_after(0, lambda: (
                 self.conn_badge.configure(text="● Desconectado", text_color=TEXT_RED),
                 self.btn_connect.configure(state="normal", text="Conectar Drive",
                                            fg_color=BG_INPUT, hover_color=BORDER,
@@ -1019,9 +1033,9 @@ class BackupApp(ctk.CTk):
                     self.log("Reconexão automática falhou.", "ERROR")
                     return
                 self._drive_connected = True
-                self.after(0, self._on_drive_connected)
+                self._safe_after(0, self._on_drive_connected)
 
-            self.after(0, self.progress.start)
+            self._safe_after(0, self.progress.start)
 
             for profile in profiles:
                 if self._sync_cancel_evt.is_set():
@@ -1029,7 +1043,7 @@ class BackupApp(ctk.CTk):
                     break
                 prev_pid = self._running_profile_id
                 self._running_profile_id = profile.get("id")
-                self.after(0, lambda cur=self._running_profile_id, prv=prev_pid:
+                self._safe_after(0, lambda cur=self._running_profile_id, prv=prev_pid:
                            self._update_running_card(cur, prv))
                 try:
                     self.backup_mgr.run_sync(profile, history, self._sync_cancel_evt)
@@ -1042,9 +1056,9 @@ class BackupApp(ctk.CTk):
         finally:
             prev = self._running_profile_id
             self._running_profile_id = None
-            self.after(0, lambda prv=prev: self._update_running_card(None, prv))
+            self._safe_after(0, lambda prv=prev: self._update_running_card(None, prv))
             self._sync_lock.release()
-            self.after(0, self._progress_stop_reset)
+            self._safe_after(0, self._progress_stop_reset)
 
     def _tick_scheduler_status(self):
         status = self.scheduler.get_status()
@@ -1054,7 +1068,7 @@ class BackupApp(ctk.CTk):
             self.lbl_sched_status.configure(
                 text=f"● Sync ativo — próximo: {status['next_run']}" if status["active"] else "● Sync parado",
                 text_color=TEXT_GRN if status["active"] else TEXT_SEC)
-        self.after(0, _do)
+        self._safe_after(0, _do)
         if self._sched_after_id is not None:
             try:
                 self.after_cancel(self._sched_after_id)
@@ -1130,10 +1144,10 @@ class BackupApp(ctk.CTk):
                 draw.ellipse([28, 20, 60, 52], fill="#238636")
                 draw.rectangle([8, 36, 56, 56], fill="#238636")
             menu = pystray.Menu(
-                pystray.MenuItem("Abrir",      lambda: self.after(0, self._show_window), default=True),
-                pystray.MenuItem("Sync agora", lambda: self.after(0, self._tray_sync_now)),
+                pystray.MenuItem("Abrir",      lambda: self._safe_after(0, self._show_window), default=True),
+                pystray.MenuItem("Sync agora", lambda: self._safe_after(0, self._tray_sync_now)),
                 pystray.Menu.SEPARATOR,
-                pystray.MenuItem("Encerrar",   lambda: self.after(0, self._quit_app)),
+                pystray.MenuItem("Encerrar",   lambda: self._safe_after(0, self._quit_app)),
             )
             self._tray_icon = pystray.Icon(APP_NAME, img, APP_NAME, menu)
             threading.Thread(target=self._tray_icon.run, daemon=True).start()
@@ -1155,6 +1169,7 @@ class BackupApp(ctk.CTk):
             self._quit_app()
 
     def _quit_app(self):
+        self._app_alive = False   # sinaliza threads antes de destroy()
         self.scheduler.stop()
         if self._tray_icon:
             self._tray_icon.stop()
