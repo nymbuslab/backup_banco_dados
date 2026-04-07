@@ -17,6 +17,10 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from typing import Callable
 
+import keyring
+
+from config_manager import KEYRING_SERVICE, KEYRING_SMTP_PASSWORD
+
 COOLDOWN_HOURS = 12   # intervalo mínimo entre alertas do mesmo tipo por perfil
 
 
@@ -30,11 +34,20 @@ class EmailService:
     def update_config(self, config: dict):
         self.cfg = config
 
+    def _get_password(self) -> str:
+        inline_password = self.cfg.get("smtp_password", "")
+        if inline_password:
+            return inline_password
+        try:
+            return keyring.get_password(KEYRING_SERVICE, KEYRING_SMTP_PASSWORD) or ""
+        except Exception:
+            return ""
+
     def is_configured(self) -> bool:
         return bool(
             self.cfg.get("smtp_host") and
             self.cfg.get("smtp_user") and
-            self.cfg.get("smtp_password") and
+            self._get_password() and
             self.cfg.get("to_addr")
         )
 
@@ -58,7 +71,7 @@ class EmailService:
             host    = self.cfg["smtp_host"]
             port    = int(self.cfg.get("smtp_port", 587))
             user    = self.cfg["smtp_user"]
-            pwd     = self.cfg["smtp_password"]
+            pwd     = self._get_password()
             to_addr = self.cfg["to_addr"]
             use_tls = self.cfg.get("use_tls", True)
 

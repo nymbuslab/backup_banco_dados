@@ -65,6 +65,7 @@ if exist "build" rmdir /s /q "build" >nul 2>&1
 
 echo.
 echo [3/5] Instalando dependencias...
+echo Incluindo dependencias do app definidas em requirements.txt ^(inclui keyring^)
 python -m pip install -r requirements.txt
 python -m pip install pyinstaller
 
@@ -81,6 +82,9 @@ pyinstaller ^
   --add-data "assets\gr7backup.ico;." ^
   --hidden-import=pystray._win32 ^
   --hidden-import=PIL ^
+  --hidden-import=keyring.backends.Windows ^
+  --hidden-import=win32ctypes.pywin32.pywintypes ^
+  --hidden-import=win32ctypes.pywin32.win32cred ^
   --collect-data=customtkinter ^
   main.py
 

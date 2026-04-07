@@ -102,7 +102,7 @@ class BackupManager:
         if cancel_evt and cancel_evt.is_set():
             return
         drive_files = self.drive.list_files_in_folder(dest_id)
-        drive_files.sort(key=lambda f: self._extract_sort_key(f["name"]))
+        drive_files.sort(key=self._drive_file_sort_key)
         while len(drive_files) > qtd:
             if cancel_evt and cancel_evt.is_set():
                 return
@@ -112,7 +112,7 @@ class BackupManager:
             drive_files = drive_files[1:]
 
         remaining = self.drive.list_files_in_folder(dest_id)
-        remaining.sort(key=lambda f: self._extract_sort_key(f["name"]))
+        remaining.sort(key=self._drive_file_sort_key)
         self.log(f"Concluído. Drive contém {len(remaining)} backup(s):", "OK")
         for f in remaining:
             self.log(f"  → {f['name']}", "INFO")
@@ -134,6 +134,9 @@ class BackupManager:
             if ext_raw else []
         )
         all_ext = not extensoes
+
+        local_files = self._scan_local_for_age_alert(backup_dir, extensoes, all_ext, recursivo)
+        self._check_backup_age(cfg, local_files)
 
         # Garante estrutura base no Drive: Pai / Cliente / Nome-do-perfil
         pai_id  = self._ensure_folder(folder_pai, None)
@@ -182,7 +185,7 @@ class BackupManager:
 
         # Lista os arquivos na pasta raiz do Drive para o usuário ver o estado atual
         remaining = self.drive.list_files_in_folder(dest_id)
-        remaining.sort(key=lambda f: self._extract_sort_key(f["name"]))
+        remaining.sort(key=self._drive_file_sort_key)
         if remaining:
             self.log(f"Drive contém {len(remaining)} arquivo(s) na raiz:", "INFO")
             for f in remaining:
@@ -262,6 +265,8 @@ class BackupManager:
                 sub_local = os.path.join(local_dir, name)
                 if not os.path.isdir(sub_local):
                     continue
+                if not self._dir_has_sync_content(sub_local, extensoes, all_ext, recursivo):
+                    continue
                 # Cria/obtém pasta correspondente no Drive
                 sub_drive_id = self._ensure_folder(name, drive_id)
                 if not sub_drive_id:
@@ -340,6 +345,51 @@ class BackupManager:
             self.log(f"Erro ao escanear pasta local: {e}", "ERROR")
         return result
 
+    def _scan_local_for_age_alert(self, folder: str, extensions: list,
+                                  all_ext: bool = False, recursive: bool = False) -> list[dict]:
+        if not recursive:
+            result = self._scan_local(folder, extensions, all_ext)
+            result.sort(key=lambda f: f["sort_key"])
+            return result
+
+        result = []
+        try:
+            for root, _, files in os.walk(folder):
+                for fname in files:
+                    if not all_ext:
+                        ext = fname.rsplit(".", 1)[-1].lower() if "." in fname else ""
+                        if ext not in extensions:
+                            continue
+                    fpath = os.path.join(root, fname)
+                    result.append({
+                        "name": fname,
+                        "path": fpath,
+                        "sort_key": self._extract_sort_key(fname),
+                        "size": os.path.getsize(fpath),
+                    })
+        except Exception as e:
+            self.log(f"Erro ao escanear pasta local: {e}", "ERROR")
+        result.sort(key=lambda f: f["sort_key"])
+        return result
+
+    def _dir_has_sync_content(self, folder: str, extensions: list,
+                              all_ext: bool = False, recursive: bool = False) -> bool:
+        try:
+            for name in os.listdir(folder):
+                path = os.path.join(folder, name)
+                if os.path.isfile(path):
+                    if all_ext:
+                        return True
+                    ext = name.rsplit(".", 1)[-1].lower() if "." in name else ""
+                    if ext in extensions:
+                        return True
+                elif recursive and os.path.isdir(path):
+                    if self._dir_has_sync_content(path, extensions, all_ext, recursive):
+                        return True
+        except Exception:
+            return False
+        return False
+
     def _validate_count(self, sorted_files: list, qtd: int):
         count = len(sorted_files)
         if count >= qtd:
@@ -380,12 +430,27 @@ class BackupManager:
             return m.group(1)
         return fname
 
+    @classmethod
+    def _drive_file_sort_key(cls, drive_file: dict) -> tuple[int, str]:
+        name = drive_file.get("name", "")
+        sort_key = cls._extract_sort_key(name)
+        if sort_key != name:
+            return (0, sort_key)
+        return (1, drive_file.get("createdTime") or name)
+
     @staticmethod
     def _extract_date(fname: str) -> date | None:
-        m = re.search(r"(\d{4})(\d{2})(\d{2})", fname)
+        m = re.search(r"(?:^|[^0-9])(\d{4})(\d{2})(\d{2})(?!\d)", fname)
         if m:
             try:
-                return date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+                year = int(m.group(1))
+                month = int(m.group(2))
+                day = int(m.group(3))
+                if not 1 <= month <= 12:
+                    return None
+                if not 1 <= day <= 31:
+                    return None
+                return date(year, month, day)
             except ValueError:
                 pass
         return None

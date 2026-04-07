@@ -54,10 +54,14 @@ class SyncScheduler:
                 self._cancel_evt.clear()
             except Exception:
                 pass
+        should_start_thread = False
         with self._lock:
             self._active   = True
             self._next_run = datetime.now()   # primeira execução imediata
-        if not self._running:
+            if not self._running:
+                self._running = True
+                should_start_thread = True
+        if should_start_thread:
             self._start_thread()
 
     def stop(self):
@@ -69,8 +73,8 @@ class SyncScheduler:
                 pass
         with self._lock:
             self._active = False
+            self._running = False
         self._stop_evt.set()
-        self._running = False
 
     def set_use_interval(self, enabled: bool):
         """
@@ -111,7 +115,6 @@ class SyncScheduler:
     # ── Internals ─────────────────────────────────────────────────────────────
     def _start_thread(self):
         self._stop_evt.clear()
-        self._running = True
         self._thread  = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
 

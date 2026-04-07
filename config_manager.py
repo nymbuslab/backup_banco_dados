@@ -30,13 +30,19 @@ converte para o novo formato preservando todos os dados.
 
 import json
 import os
-import uuid
-from datetime import datetime
 import tempfile
+import threading
+import uuid
+from copy import deepcopy
+from datetime import datetime
+
+import keyring
 
 from app_paths import app_path
 
 CONFIG_FILE = "backup_config.json"
+KEYRING_SERVICE = "GR7BackupManager"
+KEYRING_SMTP_PASSWORD = "smtp_password"
 
 
 def _new_id() -> str:
@@ -47,15 +53,33 @@ class ConfigManager:
     def __init__(self):
         self.path = app_path(CONFIG_FILE)
         self.bak_path = self.path + ".bak"
+        self._lock = threading.RLock()
+        self._cache = None
 
-    # ── Persistence ───────────────────────────────────────────────────────────
+    # ── Persistence ─────────────────────────────────────────────────────────────
     def save(self, data: dict):
+        with self._lock:
+            self._save_unlocked(data)
+
+    def load(self) -> dict:
+        with self._lock:
+            return self._load_unlocked()
+
+    def update(self, updater):
+        with self._lock:
+            data = self._load_unlocked()
+            result = updater(data)
+            self._save_unlocked(data)
+            return data if result is None else result
+
+    def _save_unlocked(self, data: dict):
         dir_path = os.path.dirname(self.path) or "."
         tmp_path = None
         try:
+            data_to_save = self._normalize_data(data)
             fd, tmp_path = tempfile.mkstemp(prefix="backup_config.", suffix=".tmp", dir=dir_path)
             with os.fdopen(fd, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2, ensure_ascii=False)
+                json.dump(data_to_save, f, indent=2, ensure_ascii=False)
                 f.flush()
                 os.fsync(f.fileno())
             if os.path.exists(self.path):
@@ -69,6 +93,7 @@ class ConfigManager:
                 except Exception:
                     pass
             os.replace(tmp_path, self.path)
+            self._cache = self._migrate(data_to_save)
         except Exception as e:
             if tmp_path:
                 try:
@@ -77,19 +102,25 @@ class ConfigManager:
                     pass
             print(f"[ConfigManager] Erro ao salvar: {e}")
 
-    def load(self) -> dict:
+    def _load_unlocked(self) -> dict:
+        if self._cache is not None:
+            return deepcopy(self._cache)
         if not os.path.exists(self.path):
-            return self._empty()
+            self._cache = self._empty()
+            return deepcopy(self._cache)
         try:
             with open(self.path, "r", encoding="utf-8") as f:
                 raw = json.load(f)
-            return self._migrate(raw)
+            self._cache = self._migrate(raw)
+            return deepcopy(self._cache)
         except Exception:
             bak = self._try_load_backup()
             if bak is not None:
-                return self._migrate(bak)
+                self._cache = self._migrate(bak)
+                return deepcopy(self._cache)
             self._quarantine_broken_file()
-            return self._empty()
+            self._cache = self._empty()
+            return deepcopy(self._cache)
 
     def _try_load_backup(self) -> dict | None:
         if not os.path.exists(self.bak_path):
@@ -110,26 +141,29 @@ class ConfigManager:
         except Exception:
             pass
 
-    # ── Profile helpers ───────────────────────────────────────────────────────
+    # ── Profile helpers ─────────────────────────────────────────────────────────
     def get_profiles(self) -> list:
         return self.load().get("profiles", [])
 
     def save_profile(self, profile: dict):
         """Insere ou atualiza um perfil pelo id."""
-        data = self.load()
-        profiles = data.get("profiles", [])
-        idx = next((i for i, p in enumerate(profiles) if p["id"] == profile["id"]), None)
-        if idx is not None:
-            profiles[idx] = profile
-        else:
-            profiles.append(profile)
-        data["profiles"] = profiles
-        self.save(data)
+
+        def _update(data: dict):
+            profiles = data.get("profiles", [])
+            idx = next((i for i, p in enumerate(profiles) if p["id"] == profile["id"]), None)
+            if idx is not None:
+                profiles[idx] = profile
+            else:
+                profiles.append(profile)
+            data["profiles"] = profiles
+
+        self.update(_update)
 
     def delete_profile(self, profile_id: str):
-        data = self.load()
-        data["profiles"] = [p for p in data.get("profiles", []) if p["id"] != profile_id]
-        self.save(data)
+        self.update(lambda data: data.__setitem__(
+            "profiles",
+            [p for p in data.get("profiles", []) if p["id"] != profile_id],
+        ))
 
     def new_profile(self, folder_pai: str = "GR7 BACKUP MANAGER") -> dict:
         """Retorna um perfil vazio com valores padrão."""
@@ -146,10 +180,10 @@ class ConfigManager:
             "email_alerta": False,
         }
 
-    # ── Internal ──────────────────────────────────────────────────────────────
+    # ── Internal ────────────────────────────────────────────────────────────────
     @staticmethod
     def _empty() -> dict:
-        return {
+        data = {
             "profiles":      [],
             "sync_active":   False,
             "auto_sync":     False,
@@ -164,19 +198,23 @@ class ConfigManager:
                 "use_tls":       True,
             },
         }
+        ConfigManager._inject_secret(data["email_config"])
+        return data
 
     @staticmethod
     def _migrate(raw: dict) -> dict:
         """
         Converte formato antigo (campos soltos) para o novo (profiles[]).
-        Roda apenas uma vez — depois o campo "profiles" já existe.
+        Roda apenas uma vez; depois o campo "profiles" já existe.
         """
         defaults = ConfigManager._empty()
         if "profiles" in raw:
             defaults.update(raw)
+            defaults["email_config"] = ConfigManager._normalize_email_config(defaults.get("email_config"))
+            ConfigManager._migrate_plaintext_password(defaults["email_config"])
+            ConfigManager._inject_secret(defaults["email_config"])
             return defaults
 
-        # Formato antigo detectado → converte
         profile = {
             "id":          _new_id(),
             "nome":        raw.get("cliente", "Perfil Migrado"),
@@ -196,4 +234,59 @@ class ConfigManager:
             "sync_interval": raw.get("sync_interval", "1 hora"),
             "history":       raw.get("history", []),
         })
+        defaults["email_config"] = ConfigManager._normalize_email_config(defaults.get("email_config"))
+        ConfigManager._migrate_plaintext_password(defaults["email_config"])
+        ConfigManager._inject_secret(defaults["email_config"])
         return defaults
+
+    @staticmethod
+    def _normalize_email_config(email_cfg) -> dict:
+        defaults_email = {
+            "smtp_host": "",
+            "smtp_port": 587,
+            "smtp_user": "",
+            "smtp_password": "",
+            "to_addr": "",
+            "use_tls": True,
+        }
+        if not isinstance(email_cfg, dict):
+            return dict(defaults_email)
+        data = dict(defaults_email)
+        data.update(email_cfg)
+        return data
+
+    @staticmethod
+    def _normalize_data(data: dict) -> dict:
+        normalized = dict(data)
+        email_cfg = ConfigManager._normalize_email_config(normalized.get("email_config"))
+        password = email_cfg.get("smtp_password", "")
+        if password:
+            ConfigManager._set_smtp_password(password)
+        email_cfg["smtp_password"] = ""
+        normalized["email_config"] = email_cfg
+        return normalized
+
+    @staticmethod
+    def _migrate_plaintext_password(email_cfg: dict):
+        plaintext = email_cfg.get("smtp_password", "")
+        if plaintext:
+            ConfigManager._set_smtp_password(plaintext)
+            email_cfg["smtp_password"] = ""
+
+    @staticmethod
+    def _inject_secret(email_cfg: dict):
+        email_cfg["smtp_password"] = ConfigManager._get_smtp_password()
+
+    @staticmethod
+    def _get_smtp_password() -> str:
+        try:
+            return keyring.get_password(KEYRING_SERVICE, KEYRING_SMTP_PASSWORD) or ""
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _set_smtp_password(password: str):
+        try:
+            keyring.set_password(KEYRING_SERVICE, KEYRING_SMTP_PASSWORD, password)
+        except Exception as e:
+            print(f"[ConfigManager] Erro ao salvar senha no keyring: {e}")

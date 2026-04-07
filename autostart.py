@@ -80,6 +80,8 @@ def disable() -> bool:
         ) as key:
             winreg.DeleteValue(key, APP_NAME)
         return True
+    except FileNotFoundError:
+        return True
     except (OSError, ImportError) as e:
         print(f"[AutoStart] Erro ao desativar: {e}")
         return False

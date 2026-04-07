@@ -434,6 +434,9 @@ class EmailConfigForm(ctk.CTkToplevel):
                      text="Desative para SSL direto (porta 465).",
                      font=FONT_TINY, text_color=TEXT_SEC
                      ).grid(row=9, column=0, sticky="w", pady=(0, 4))
+        self.lbl_test_status = ctk.CTkLabel(f, text="",
+                                            font=FONT_TINY, text_color=TEXT_SEC)
+        self.lbl_test_status.grid(row=10, column=0, sticky="w", pady=(10, 0))
 
     def _load(self):
         c = self.config
@@ -466,8 +469,7 @@ class EmailConfigForm(ctk.CTkToplevel):
                                    "Preencha todos os campos antes de testar.", parent=self)
             return
         import threading
-        self.after(0, lambda: messagebox.showinfo(
-            "Enviando…", "Aguarde, enviando e-mail de teste…", parent=self))
+        self.lbl_test_status.configure(text="Enviando e-mail de teste...", text_color=TEXT_SEC)
 
         def _do():
             svc = EmailService(cfg, lambda msg, lv: None)
@@ -477,12 +479,13 @@ class EmailConfigForm(ctk.CTkToplevel):
                 "Se você recebeu esta mensagem, a configuração está correta.\n\n"
                 "---\nGR7 Backup Manager"
             )
-            self.after(0, lambda: messagebox.showinfo(
-                "Teste concluído" if ok else "Falha no teste",
-                "E-mail de teste enviado com sucesso!" if ok
-                else "Não foi possível enviar. Verifique as configurações e tente novamente.",
-                parent=self
-            ))
+            def _finish():
+                self.lbl_test_status.configure(
+                    text="E-mail de teste enviado com sucesso!" if ok
+                    else "Falha no envio. Verifique as configurações e tente novamente.",
+                    text_color=TEXT_GRN if ok else TEXT_RED,
+                )
+            self.after(0, _finish)
         threading.Thread(target=_do, daemon=True).start()
 
     def _save(self):
@@ -495,8 +498,11 @@ class EmailConfigForm(ctk.CTkToplevel):
 #  Main App
 # ─────────────────────────────────────────────────────────────────────────────
 class BackupApp(ctk.CTk):
-    def __init__(self):
+    def __init__(self, start_minimized: bool = False):
         super().__init__()
+        self._app_alive = True
+        if start_minimized:
+            self.withdraw()
         self.title(APP_NAME)
         self.geometry("1180x760")
         self.minsize(1000, 620)
@@ -520,6 +526,7 @@ class BackupApp(ctk.CTk):
 
         self._app_alive       = True   # False após destroy() — protege self.after() de threads em background
         self._sync_lock       = threading.Lock()
+        self._running_profile_lock = threading.Lock()
         self._card_refs: dict = {}   # pid → {card, lbl_detail, base_detail}
         self._tray_icon       = None
         self._drive_connected = False
@@ -548,8 +555,8 @@ class BackupApp(ctk.CTk):
         self.progress = None
 
         self._build_ui()
-        self._load_all()
         self._check_drive_connection()
+        self._load_all()
 
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self._tick_scheduler_status()
@@ -830,7 +837,7 @@ class BackupApp(ctk.CTk):
     def _render_profile_card(self, p: dict, last_ok_by_name: dict):
         is_rotacao = p.get("modo", "rotacao") == "rotacao"
         ativo      = p.get("ativo", True)
-        running    = (p.get("id") == self._running_profile_id)
+        running    = (p.get("id") == self._get_running_profile_id())
         pid        = p["id"]
 
         card = ctk.CTkFrame(self.profiles_box, fg_color=BG_CARD, corner_radius=8,
@@ -970,10 +977,6 @@ class BackupApp(ctk.CTk):
             messagebox.showwarning("Drive não conectado",
                                    "Conecte-se ao Google Drive antes de sincronizar.")
             return
-        if not self._sync_lock.acquire(blocking=False):
-            self.log("Já existe uma sincronização em andamento.", "INFO")
-            return
-        self._sync_lock.release()
         threading.Thread(target=lambda: self._do_profile_sync(profile_id), daemon=True).start()
 
     def _do_profile_sync(self, profile_id: str):
@@ -997,8 +1000,7 @@ class BackupApp(ctk.CTk):
                 self._drive_connected = True
                 self._safe_after(0, self._on_drive_connected)
 
-            prev_pid = self._running_profile_id
-            self._running_profile_id = profile_id
+            prev_pid = self._set_running_profile_id(profile_id)
             self._safe_after(0, lambda cur=profile_id, prv=prev_pid:
                        self._update_running_card(cur, prv))
             self._safe_after(0, self.progress.start)
@@ -1007,11 +1009,10 @@ class BackupApp(ctk.CTk):
                 self.backup_mgr.run_sync(profile, history, cancel_evt=self._sync_cancel_evt)
             except (OSError, ValueError, KeyError, TypeError) as e:
                 self.log(f"Erro no perfil '{profile.get('nome','')}': {e}", "ERROR")
-            self.config_mgr.save({**data, "history": history})
+            self.config_mgr.update(lambda cfg: cfg.__setitem__("history", list(history)))
             self.refresh_history(history)
         finally:
-            prev = self._running_profile_id
-            self._running_profile_id = None
+            prev = self._set_running_profile_id(None)
             self._safe_after(0, lambda prv=prev: self._update_running_card(None, prv))
             self._safe_after(0, self._progress_stop_reset)
             self._sync_lock.release()
@@ -1026,7 +1027,7 @@ class BackupApp(ctk.CTk):
         Evita 'main thread is not in main loop' quando uma thread de background
         tenta atualizar a UI depois que a janela já foi destruída.
         """
-        if not self._app_alive:
+        if not getattr(self, "_app_alive", False):
             return
         try:
             self.after(ms, fn, *args)
@@ -1090,7 +1091,8 @@ class BackupApp(ctk.CTk):
                 ctk.CTkLabel(self.hist_box, text="Nenhum backup registrado ainda.",
                              font=FONT_SMALL, text_color=TEXT_SEC).pack(pady=20)
                 return
-            for e in reversed(entries):
+            visible_entries = list(reversed(entries[-50:]))
+            for e in visible_entries:
                 sc  = TEXT_GRN if e.get("status") == "OK" else TEXT_RED
                 row = ctk.CTkFrame(self.hist_box, fg_color=BG_CARD, corner_radius=6,
                                    border_width=1, border_color=BORDER)
@@ -1109,6 +1111,11 @@ class BackupApp(ctk.CTk):
                 ctk.CTkLabel(row, text=e.get("datetime", ""),
                              font=FONT_SMALL, text_color=TEXT_SEC
                              ).grid(row=0, column=2, padx=(0, 10))
+            if len(entries) > len(visible_entries):
+                ctk.CTkLabel(self.hist_box,
+                             text=f"Exibindo os {len(visible_entries)} registros mais recentes.",
+                             font=FONT_TINY, text_color=TEXT_SEC
+                             ).pack(pady=(6, 2))
         self._safe_after(0, _do)
 
     # ═══════════════════════════════════════════════════════════════════════════
@@ -1245,21 +1252,20 @@ class BackupApp(ctk.CTk):
                 if self._sync_cancel_evt.is_set():
                     self.log("Sincronização cancelada.", "WARN")
                     break
-                prev_pid = self._running_profile_id
-                self._running_profile_id = profile.get("id")
-                self._safe_after(0, lambda cur=self._running_profile_id, prv=prev_pid:
+                current_pid = profile.get("id")
+                prev_pid = self._set_running_profile_id(current_pid)
+                self._safe_after(0, lambda cur=current_pid, prv=prev_pid:
                            self._update_running_card(cur, prv))
                 try:
                     self.backup_mgr.run_sync(profile, history, self._sync_cancel_evt)
                 except (OSError, ValueError, KeyError, TypeError) as e:
                     self.log(f"Erro no perfil '{profile.get('nome','')}': {e}", "ERROR")
 
-            self.config_mgr.save({**data, "history": history})
+            self.config_mgr.update(lambda cfg: cfg.__setitem__("history", list(history)))
             self.refresh_history(history)
 
         finally:
-            prev = self._running_profile_id
-            self._running_profile_id = None
+            prev = self._set_running_profile_id(None)
             self._safe_after(0, lambda prv=prev: self._update_running_card(None, prv))
             self._sync_lock.release()
             self._safe_after(0, self._progress_stop_reset)
@@ -1287,10 +1293,6 @@ class BackupApp(ctk.CTk):
         if self._sync_cancel_evt.is_set():
             self.log("Sync cancelado. Inicie novamente pela janela principal.", "WARN")
             return
-        if not self._sync_lock.acquire(blocking=False):
-            self.log("Já existe uma sincronização em andamento.", "INFO")
-            return
-        self._sync_lock.release()
         threading.Thread(target=self._do_background_sync, daemon=True).start()
 
     # ═══════════════════════════════════════════════════════════════════════════
@@ -1399,20 +1401,19 @@ class BackupApp(ctk.CTk):
         current_cfg = data.get("email_config", {})
 
         def _on_save(new_cfg: dict):
-            d = self.config_mgr.load()
-            d["email_config"] = new_cfg
-            self.config_mgr.save(d)
+            self.config_mgr.update(lambda d: d.__setitem__("email_config", new_cfg))
             self.email_svc.update_config(new_cfg)
             self.log("Configuração de e-mail salva.", "OK")
 
         EmailConfigForm(self, current_cfg, _on_save)
 
     def _persist_globals(self):
-        data = self.config_mgr.load()
-        data["auto_sync"]     = self.var_auto.get()
-        data["sync_interval"] = self.var_interval.get()
-        data["sync_active"]   = self.scheduler.is_active()
-        self.config_mgr.save(data)
+        def _update(data: dict):
+            data["auto_sync"] = self.var_auto.get()
+            data["sync_interval"] = self.var_interval.get()
+            data["sync_active"] = self.scheduler.is_active()
+
+        self.config_mgr.update(_update)
 
     def _load_all(self):
         data = self.config_mgr.load()
@@ -1439,11 +1440,22 @@ class BackupApp(ctk.CTk):
         self.refresh_history(data.get("history", []))
         self.log("Configuração carregada.", "OK")
 
+    def _get_running_profile_id(self) -> str | None:
+        with self._running_profile_lock:
+            return self._running_profile_id
+
+    def _set_running_profile_id(self, profile_id: str | None) -> str | None:
+        with self._running_profile_lock:
+            prev = self._running_profile_id
+            self._running_profile_id = profile_id
+            return prev
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    app = BackupApp()
-    if "--minimized" in sys.argv:
+    start_minimized = "--minimized" in sys.argv
+    app = BackupApp(start_minimized=start_minimized)
+    if start_minimized:
         app.withdraw()
         app.start_tray_icon()
     app.mainloop()

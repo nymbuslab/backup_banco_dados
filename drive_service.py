@@ -1,12 +1,13 @@
+import json
 import os
-import pickle
 import time
 from typing import Callable, Any
 
 from app_paths import app_path
 
 SCOPES     = ["https://www.googleapis.com/auth/drive"]
-TOKEN_FILE = "token.pkl"
+TOKEN_FILE = "token.json"
+LEGACY_TOKEN_FILE = "token.pkl"
 CREDS_FILE = "credentials.json"
 
 # Retry config
@@ -66,11 +67,20 @@ class DriveService:
         token_path = app_path(TOKEN_FILE)
         if os.path.exists(token_path):
             try:
-                with open(token_path, "rb") as f:
-                    self.creds = pickle.load(f)
+                from google.oauth2.credentials import Credentials
+
+                with open(token_path, "r", encoding="utf-8") as f:
+                    token_info = json.load(f)
+                self.creds = Credentials.from_authorized_user_info(token_info, SCOPES)
                 self._build_service()
             except Exception:
                 self.creds = None
+        legacy_token_path = app_path(LEGACY_TOKEN_FILE)
+        if self.creds is None and os.path.exists(legacy_token_path):
+            self.log(
+                "Token legado ignorado por segurança. Reconecte o Google Drive para gerar um novo token.",
+                "WARN",
+            )
 
     def authenticate(self) -> bool:
         creds_path = app_path(CREDS_FILE)
@@ -89,8 +99,7 @@ class DriveService:
                 flow = InstalledAppFlow.from_client_secrets_file(creds_path, SCOPES)
                 self.creds = flow.run_local_server(port=0)
 
-            with open(app_path(TOKEN_FILE), "wb") as f:
-                pickle.dump(self.creds, f)
+            self._save_token()
             self._build_service()
             return True
         except Exception as e:
@@ -105,6 +114,12 @@ class DriveService:
             self.log(f"Erro ao criar serviço Drive: {e}", "ERROR")
             self.service = None
 
+    def _save_token(self):
+        if not self.creds:
+            return
+        with open(app_path(TOKEN_FILE), "w", encoding="utf-8") as f:
+            f.write(self.creds.to_json())
+
     def is_authenticated(self) -> bool:
         try:
             if self.creds and self.creds.valid and self.service:
@@ -112,6 +127,7 @@ class DriveService:
             if self.creds and self.creds.expired and self.creds.refresh_token:
                 from google.auth.transport.requests import Request
                 self.creds.refresh(Request())
+                self._save_token()
                 self._build_service()
                 return True
         except Exception:
@@ -126,8 +142,7 @@ class DriveService:
                 from google.auth.transport.requests import Request
                 self.creds.refresh(Request())
                 try:
-                    with open(app_path(TOKEN_FILE), "wb") as f:
-                        pickle.dump(self.creds, f)
+                    self._save_token()
                 except Exception:
                     pass
                 return True
@@ -350,6 +365,7 @@ class DriveService:
     def disconnect(self):
         self.creds   = None
         self.service = None
-        token_path   = app_path(TOKEN_FILE)
-        if os.path.exists(token_path):
-            os.remove(token_path)
+        for token_name in (TOKEN_FILE, LEGACY_TOKEN_FILE):
+            token_path = app_path(token_name)
+            if os.path.exists(token_path):
+                os.remove(token_path)
