@@ -20,14 +20,18 @@ from typing import Callable
 
 from drive_service import DriveService
 
+ALERT_DAYS = 2   # dias sem novo backup para disparar alerta (48 h)
+
 
 class BackupManager:
     def __init__(self, drive_svc: DriveService,
                  log_fn: Callable,
-                 refresh_fn: Callable):
-        self.drive   = drive_svc
-        self.log     = log_fn
-        self.refresh = refresh_fn
+                 refresh_fn: Callable,
+                 email_svc=None):
+        self.drive     = drive_svc
+        self.log       = log_fn
+        self.refresh   = refresh_fn
+        self.email_svc = email_svc   # EmailService | None
 
     # ═══════════════════════════════════════════════════════════════════════════
     #  Entry point — roteia pelo modo do perfil
@@ -63,6 +67,9 @@ class BackupManager:
         local_files.sort(key=lambda f: f["sort_key"])
         self.log(f"{len(local_files)} arquivo(s) encontrado(s) localmente.", "INFO")
 
+        # Verifica se o backup mais recente ultrapassou o limite de dias sem atualizar
+        self._check_backup_age(cfg, local_files)
+
         last_n = local_files[-qtd:]
         self._validate_count(last_n, qtd)
 
@@ -76,33 +83,33 @@ class BackupManager:
 
         wanted_names = [f["name"] for f in last_n]
         drive_names  = self.drive.find_files_in_folder_by_names(dest_id, wanted_names)
-        uploaded_any = False
 
         for f in last_n:
             if cancel_evt and cancel_evt.is_set():
                 return
             if f["name"] not in drive_names:
+                self.log(f"Enviando: {f['name']}", "INFO")
                 ok = self.drive.upload_file(f["path"], dest_id, cancel_evt=cancel_evt)
                 self._record(history, f["name"], cfg.get("nome",""), "OK" if ok else "ERROR")
-                if ok:
-                    uploaded_any = True
+                if not ok:
+                    self.log(f"Falha ao enviar: {f['name']}", "ERROR")
+                    if cfg.get("email_alerta") and self.email_svc:
+                        self.email_svc.alert_erro_upload(cfg, f["name"])
             else:
                 self.log(f"Já existe no Drive: {f['name']}", "INFO")
 
-        # Sliding window — remove apenas o mais antigo se ultrapassar o limite
-        if uploaded_any:
+        # Sliding window — sempre verifica e mantém só os N mais recentes no Drive
+        if cancel_evt and cancel_evt.is_set():
+            return
+        drive_files = self.drive.list_files_in_folder(dest_id)
+        drive_files.sort(key=lambda f: self._extract_sort_key(f["name"]))
+        while len(drive_files) > qtd:
             if cancel_evt and cancel_evt.is_set():
                 return
-            drive_files = self.drive.list_files_in_folder(dest_id)
-            drive_files.sort(key=lambda f: self._extract_sort_key(f["name"]))
-            if len(drive_files) > qtd:
-                oldest = drive_files[0]
-                self.log(f"Janela deslizante: removendo → {oldest['name']}", "WARN")
-                self.drive.delete_file(oldest["id"], oldest["name"])
-                drive_files = self.drive.list_files_in_folder(dest_id)
-                if len(drive_files) > qtd:
-                    self.log(f"Drive contém {len(drive_files)} arquivos (limite {qtd}). "
-                             "Remova manualmente os excedentes se necessário.", "WARN")
+            oldest = drive_files[0]
+            self.log(f"Janela deslizante: removendo → {oldest['name']}", "WARN")
+            self.drive.delete_file(oldest["id"], oldest["name"])
+            drive_files = drive_files[1:]
 
         remaining = self.drive.list_files_in_folder(dest_id)
         remaining.sort(key=lambda f: self._extract_sort_key(f["name"]))
@@ -139,7 +146,7 @@ class BackupManager:
 
         # Sincroniza recursivamente a partir da pasta raiz
         drive_cache = {}
-        total_new, total_ok = self._espelho_dir(
+        total_new, total_ok, total_already = self._espelho_dir(
             local_dir   = backup_dir,
             drive_id    = dest_id,
             extensoes   = extensoes,
@@ -152,31 +159,57 @@ class BackupManager:
             drive_cache = drive_cache,
         )
 
-        self.log(
-            f"Espelho concluído: {total_ok}/{total_new} arquivo(s) enviado(s).",
-            "OK" if total_ok == total_new else "WARN"
-        )
+        if total_new == 0 and total_already == 0:
+            self.log("Nenhum arquivo local encontrado para sincronizar.", "WARN")
+        elif total_new == 0:
+            self.log(
+                f"Espelho concluído. Tudo já sincronizado: {total_already} arquivo(s) no Drive.",
+                "OK"
+            )
+        else:
+            falhas = total_new - total_ok
+            level  = "OK" if falhas == 0 else "WARN"
+            self.log(
+                f"Espelho concluído. Enviado(s): {total_ok}/{total_new} novo(s). "
+                f"Já sincronizado(s): {total_already}.",
+                level
+            )
+            if falhas > 0 and cfg.get("email_alerta") and self.email_svc:
+                self.email_svc.alert_erro_sync(
+                    cfg,
+                    f"{falhas} arquivo(s) não puderam ser enviados ao Drive."
+                )
+
+        # Lista os arquivos na pasta raiz do Drive para o usuário ver o estado atual
+        remaining = self.drive.list_files_in_folder(dest_id)
+        remaining.sort(key=lambda f: self._extract_sort_key(f["name"]))
+        if remaining:
+            self.log(f"Drive contém {len(remaining)} arquivo(s) na raiz:", "INFO")
+            for f in remaining:
+                self.log(f"  → {f['name']}", "INFO")
+
         self.refresh(history)
 
     def _espelho_dir(self, local_dir: str, drive_id: str,
                      extensoes: list, all_ext: bool, recursivo: bool,
                      history: list, nome_perfil: str, rel_path: str,
-                     cancel_evt=None, drive_cache=None) -> tuple[int, int]:
+                     cancel_evt=None, drive_cache=None) -> tuple[int, int, int]:
         """
         Sincroniza um diretório local com uma pasta do Drive.
-        Retorna (novos_encontrados, enviados_com_sucesso).
+        Retorna (novos_encontrados, enviados_com_sucesso, ja_existiam).
         Se recursivo=True, desce em cada subpasta criando o espelho no Drive.
         """
-        total_new = 0
-        total_ok  = 0
+        total_new     = 0
+        total_ok      = 0
+        total_already = 0
 
         if cancel_evt and cancel_evt.is_set():
-            return 0, 0
+            return 0, 0, 0
         try:
             entries = os.listdir(local_dir)
         except Exception as e:
             self.log(f"Erro ao listar {local_dir}: {e}", "ERROR")
-            return 0, 0
+            return 0, 0, 0
 
         # ── Arquivos desta pasta ──────────────────────────────────────────────
         local_files = []
@@ -204,25 +237,28 @@ class BackupManager:
 
             display = f"/{rel_path}" if rel_path else " (raiz)"
             if already:
-                self.log(f"{already} arquivo(s) já no Drive{display} — pulando.", "INFO")
+                self.log(f"{already} arquivo(s) já sincronizado(s){display} — pulando.", "INFO")
             if new_files:
                 self.log(f"Enviando {len(new_files)} arquivo(s) novo(s){display}...", "INFO")
 
-            total_new += len(new_files)
+            total_new     += len(new_files)
+            total_already += already
             for f in new_files:
                 if cancel_evt and cancel_evt.is_set():
-                    return total_new, total_ok
+                    return total_new, total_ok, total_already
                 ok = self.drive.upload_file(f["path"], drive_id, cancel_evt=cancel_evt)
                 self._record(history, f["name"], nome_perfil, "OK" if ok else "ERROR")
                 if ok:
                     total_ok += 1
                     drive_names.add(f["name"])
+                else:
+                    self.log(f"Falha ao enviar: {f['name']}", "ERROR")
 
         # ── Subpastas (só se recursivo=True) ─────────────────────────────────
         if recursivo:
             for name in entries:
                 if cancel_evt and cancel_evt.is_set():
-                    return total_new, total_ok
+                    return total_new, total_ok, total_already
                 sub_local = os.path.join(local_dir, name)
                 if not os.path.isdir(sub_local):
                     continue
@@ -231,7 +267,7 @@ class BackupManager:
                 if not sub_drive_id:
                     continue
                 sub_rel = f"{rel_path}/{name}" if rel_path else name
-                n, o = self._espelho_dir(
+                n, o, a = self._espelho_dir(
                     local_dir   = sub_local,
                     drive_id    = sub_drive_id,
                     extensoes   = extensoes,
@@ -243,14 +279,39 @@ class BackupManager:
                     cancel_evt  = cancel_evt,
                     drive_cache = drive_cache,
                 )
-                total_new += n
-                total_ok  += o
+                total_new     += n
+                total_ok      += o
+                total_already += a
 
-        return total_new, total_ok
+        return total_new, total_ok, total_already
 
     # ═══════════════════════════════════════════════════════════════════════════
     #  Helpers compartilhados
     # ═══════════════════════════════════════════════════════════════════════════
+    def _check_backup_age(self, cfg: dict, sorted_files: list):
+        """Dispara alerta por e-mail se o backup mais recente está há ≥ ALERT_DAYS dias."""
+        if not cfg.get("email_alerta") or not self.email_svc:
+            return
+        if not sorted_files:
+            return
+        newest = sorted_files[-1]
+        newest_date = self._extract_date(newest["name"])
+        if newest_date is None:
+            try:
+                newest_date = datetime.fromtimestamp(
+                    os.path.getmtime(newest["path"])
+                ).date()
+            except Exception:
+                return
+        days_old = (date.today() - newest_date).days
+        if days_old >= ALERT_DAYS:
+            self.log(
+                f"ALERTA: backup mais recente tem {days_old} dia(s). "
+                "Enviando notificação por e-mail.",
+                "WARN"
+            )
+            self.email_svc.alert_sem_backup(cfg, newest["name"], days_old)
+
     def _ensure_folder(self, name: str, parent_id) -> str | None:
         fid = self.drive.get_or_create_folder(name, parent_id)
         if not fid:

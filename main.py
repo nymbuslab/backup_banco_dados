@@ -10,6 +10,7 @@ from config_manager import ConfigManager
 from drive_service   import DriveService
 from backup_manager  import BackupManager
 from scheduler       import SyncScheduler
+from email_service   import EmailService
 import autostart
 
 ctk.set_appearance_mode("dark")
@@ -215,6 +216,25 @@ class ProfileForm(ctk.CTkToplevel):
                      font=FONT_TINY, text_color=TEXT_SEC
                      ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(0, 4))
 
+        # Alertas por e-mail
+        ctk.CTkFrame(f, fg_color=BORDER, height=1).grid(
+            row=14, column=0, sticky="ew", pady=(12, 0))
+        email_row = ctk.CTkFrame(f, fg_color="transparent")
+        email_row.grid(row=15, column=0, sticky="ew", pady=(8, 0))
+        email_row.columnconfigure(1, weight=1)
+        ctk.CTkLabel(email_row, text="Alertas por e-mail",
+                     font=FONT_SMALL, text_color=TEXT_SEC
+                     ).grid(row=0, column=0, sticky="w")
+        self.var_email_alerta = tk.BooleanVar(value=False)
+        ctk.CTkSwitch(email_row, text="", variable=self.var_email_alerta,
+                      onvalue=True, offvalue=False, width=44,
+                      progress_color=ACCENT
+                      ).grid(row=0, column=1, sticky="e")
+        ctk.CTkLabel(f,
+                     text="Notifica atrasos e erros deste perfil (configure o servidor em ✉ E-mail).",
+                     font=FONT_TINY, text_color=TEXT_SEC
+                     ).grid(row=16, column=0, sticky="w", pady=(0, 4))
+
     def _load(self):
         p = self.profile
         if p.get("nome"):       self.ent_nome.insert(0, p["nome"])
@@ -235,6 +255,7 @@ class ProfileForm(ctk.CTkToplevel):
             self.var_qtd.set(int(qtd))
 
         self.var_recursivo.set(p.get("recursivo", False))
+        self.var_email_alerta.set(p.get("email_alerta", False))
 
     def _on_modo_change(self, value: str):
         is_rotacao = (value == "Rotação")
@@ -283,16 +304,190 @@ class ProfileForm(ctk.CTkToplevel):
             return
 
         self.profile.update({
-            "nome":       nome,
-            "modo":       modo,
-            "folder_pai": folder_pai,
-            "cliente":    cliente,
-            "backup_dir": backup_dir,
-            "extensoes":  extensoes,
-            "qtd_backups": qtd,
-            "recursivo":  self.var_recursivo.get(),
+            "nome":         nome,
+            "modo":         modo,
+            "folder_pai":   folder_pai,
+            "cliente":      cliente,
+            "backup_dir":   backup_dir,
+            "extensoes":    extensoes,
+            "qtd_backups":  qtd,
+            "recursivo":    self.var_recursivo.get(),
+            "email_alerta": self.var_email_alerta.get(),
         })
         self.on_save(self.profile)
+        self.destroy()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Email Config Form (modal)
+# ─────────────────────────────────────────────────────────────────────────────
+class EmailConfigForm(ctk.CTkToplevel):
+    """Modal para configurar SMTP de alertas por e-mail."""
+
+    def __init__(self, parent, config: dict, on_save):
+        super().__init__(parent)
+        self.config  = dict(config)
+        self.on_save = on_save
+
+        self.title("Configuração de E-mail")
+        self.geometry("480x520")
+        self.minsize(460, 480)
+        self.resizable(True, True)
+        self.configure(fg_color=BG_DARK)
+        self.grab_set()
+
+        ico = _resolve_icon()
+        if ico:
+            try:
+                self.iconbitmap(ico)
+            except (tk.TclError, OSError):
+                pass
+
+        self._build()
+        self._load()
+
+    def _build(self):
+        ctk.CTkLabel(self, text="Configuração de E-mail",
+                     font=FONT_SUB, text_color=TEXT_PRI
+                     ).pack(anchor="w", padx=24, pady=(20, 4))
+        ctk.CTkLabel(self,
+                     text="Configure o servidor SMTP para envio de alertas automáticos.",
+                     font=FONT_SMALL, text_color=TEXT_SEC
+                     ).pack(anchor="w", padx=24, pady=(0, 4))
+        ctk.CTkFrame(self, fg_color=BORDER, height=1).pack(fill="x", padx=24)
+
+        # Botões no fundo
+        btn_row = ctk.CTkFrame(self, fg_color="transparent")
+        btn_row.pack(fill="x", padx=24, pady=14, side="bottom")
+        btn_row.columnconfigure((0, 1, 2), weight=1)
+        ctk.CTkFrame(self, fg_color=BORDER, height=1).pack(fill="x", padx=24, side="bottom")
+
+        ctk.CTkButton(btn_row, text="Cancelar",
+                      fg_color=BG_INPUT, hover_color=BORDER,
+                      border_width=1, border_color=BORDER,
+                      text_color=TEXT_SEC, height=38,
+                      command=self.destroy
+                      ).grid(row=0, column=0, sticky="ew", padx=(0, 4))
+        ctk.CTkButton(btn_row, text="✉  Testar",
+                      fg_color=ACCENT_BLUE, hover_color=ACCENT_BLUE_HOV,
+                      text_color="white", height=38,
+                      command=self._test
+                      ).grid(row=0, column=1, sticky="ew", padx=4)
+        ctk.CTkButton(btn_row, text="💾  Salvar",
+                      fg_color=ACCENT, hover_color=ACCENT_HOV,
+                      text_color="white", height=38,
+                      command=self._save
+                      ).grid(row=0, column=2, sticky="ew", padx=(4, 0))
+
+        # Formulário
+        f = ctk.CTkScrollableFrame(self, fg_color="transparent", corner_radius=0)
+        f.pack(fill="both", expand=True, padx=24, pady=12)
+        f.columnconfigure(0, weight=1)
+
+        def lbl(text, row):
+            ctk.CTkLabel(f, text=text, font=FONT_SMALL,
+                         text_color=TEXT_SEC).grid(row=row, column=0,
+                                                   sticky="w", pady=(10, 2))
+        def ent(row, ph, show=""):
+            e = ctk.CTkEntry(f, placeholder_text=ph, fg_color=BG_INPUT,
+                             border_color=BORDER, text_color=TEXT_PRI,
+                             height=36, font=FONT_BODY, show=show)
+            e.grid(row=row, column=0, sticky="ew")
+            return e
+
+        lbl("Servidor SMTP", 0)
+        host_row = ctk.CTkFrame(f, fg_color="transparent")
+        host_row.grid(row=1, column=0, sticky="ew")
+        host_row.columnconfigure(0, weight=1)
+        self.ent_host = ctk.CTkEntry(host_row, placeholder_text="ex: smtp.gmail.com",
+                                     fg_color=BG_INPUT, border_color=BORDER,
+                                     text_color=TEXT_PRI, height=36, font=FONT_BODY)
+        self.ent_host.grid(row=0, column=0, sticky="ew", padx=(0, 6))
+        self.ent_port = ctk.CTkEntry(host_row, placeholder_text="587",
+                                     fg_color=BG_INPUT, border_color=BORDER,
+                                     text_color=TEXT_PRI, height=36, font=FONT_BODY,
+                                     width=70)
+        self.ent_port.grid(row=0, column=1)
+
+        lbl("Usuário (e-mail remetente)", 2)
+        self.ent_user = ent(3, "ex: seuemail@gmail.com")
+
+        lbl("Senha / App Password", 4)
+        self.ent_pwd = ent(5, "••••••••••••", show="•")
+
+        lbl("Destinatário (e-mail para alertas)", 6)
+        self.ent_to = ent(7, "ex: admin@empresa.com")
+
+        # TLS toggle
+        tls_row = ctk.CTkFrame(f, fg_color="transparent")
+        tls_row.grid(row=8, column=0, sticky="ew", pady=(14, 0))
+        tls_row.columnconfigure(1, weight=1)
+        ctk.CTkLabel(tls_row, text="Usar TLS (STARTTLS — porta 587)",
+                     font=FONT_SMALL, text_color=TEXT_SEC
+                     ).grid(row=0, column=0, sticky="w")
+        self.var_tls = tk.BooleanVar(value=True)
+        ctk.CTkSwitch(tls_row, text="", variable=self.var_tls,
+                      onvalue=True, offvalue=False, width=44,
+                      progress_color=ACCENT
+                      ).grid(row=0, column=1, sticky="e")
+        ctk.CTkLabel(f,
+                     text="Desative para SSL direto (porta 465).",
+                     font=FONT_TINY, text_color=TEXT_SEC
+                     ).grid(row=9, column=0, sticky="w", pady=(0, 4))
+
+    def _load(self):
+        c = self.config
+        if c.get("smtp_host"): self.ent_host.insert(0, c["smtp_host"])
+        port = c.get("smtp_port", 587)
+        self.ent_port.insert(0, str(port))
+        if c.get("smtp_user"):     self.ent_user.insert(0, c["smtp_user"])
+        if c.get("smtp_password"): self.ent_pwd.insert(0, c["smtp_password"])
+        if c.get("to_addr"):       self.ent_to.insert(0, c["to_addr"])
+        self.var_tls.set(c.get("use_tls", True))
+
+    def _collect(self) -> dict:
+        try:
+            port = int(self.ent_port.get().strip() or "587")
+        except ValueError:
+            port = 587
+        return {
+            "smtp_host":     self.ent_host.get().strip(),
+            "smtp_port":     port,
+            "smtp_user":     self.ent_user.get().strip(),
+            "smtp_password": self.ent_pwd.get(),
+            "to_addr":       self.ent_to.get().strip(),
+            "use_tls":       self.var_tls.get(),
+        }
+
+    def _test(self):
+        cfg = self._collect()
+        if not cfg["smtp_host"] or not cfg["smtp_user"] or not cfg["smtp_password"] or not cfg["to_addr"]:
+            messagebox.showwarning("Campos incompletos",
+                                   "Preencha todos os campos antes de testar.", parent=self)
+            return
+        import threading
+        self.after(0, lambda: messagebox.showinfo(
+            "Enviando…", "Aguarde, enviando e-mail de teste…", parent=self))
+
+        def _do():
+            svc = EmailService(cfg, lambda msg, lv: None)
+            ok = svc.send(
+                "✔ GR7 Backup — Teste de e-mail",
+                "Este é um e-mail de teste enviado pelo GR7 Backup Manager.\n\n"
+                "Se você recebeu esta mensagem, a configuração está correta.\n\n"
+                "---\nGR7 Backup Manager"
+            )
+            self.after(0, lambda: messagebox.showinfo(
+                "Teste concluído" if ok else "Falha no teste",
+                "E-mail de teste enviado com sucesso!" if ok
+                else "Não foi possível enviar. Verifique as configurações e tente novamente.",
+                parent=self
+            ))
+        threading.Thread(target=_do, daemon=True).start()
+
+    def _save(self):
+        cfg = self._collect()
+        self.on_save(cfg)
         self.destroy()
 
 
@@ -316,7 +511,10 @@ class BackupApp(ctk.CTk):
 
         self.config_mgr = ConfigManager()
         self.drive_svc  = DriveService(self.log)
-        self.backup_mgr = BackupManager(self.drive_svc, self.log, self.refresh_history)
+        email_cfg = self.config_mgr.load().get("email_config", {})
+        self.email_svc  = EmailService(email_cfg, self.log)
+        self.backup_mgr = BackupManager(self.drive_svc, self.log, self.refresh_history,
+                                        email_svc=self.email_svc)
         self._sync_cancel_evt = threading.Event()
         self.scheduler  = SyncScheduler(self._do_background_sync, self.log, cancel_evt=self._sync_cancel_evt)
 
@@ -389,6 +587,12 @@ class BackupApp(ctk.CTk):
                       border_color=BORDER, border_width=1,
                       font=FONT_SMALL, text_color=TEXT_SEC,
                       command=self._minimize_to_tray).pack(side="right", padx=(6, 0))
+
+        ctk.CTkButton(inner, text="✉ E-mail", width=90, height=28,
+                      fg_color=BG_INPUT, hover_color=BORDER,
+                      border_color=BORDER, border_width=1,
+                      font=FONT_SMALL, text_color=TEXT_SEC,
+                      command=self._open_email_config).pack(side="right", padx=(6, 0))
 
         self.conn_badge = ctk.CTkLabel(inner, text="● Desconectado",
                                        font=FONT_SMALL, text_color=TEXT_RED)
@@ -1190,6 +1394,19 @@ class BackupApp(ctk.CTk):
         self._persist_globals()
         self.log("Configurações globais salvas.", "OK")
 
+    def _open_email_config(self):
+        data = self.config_mgr.load()
+        current_cfg = data.get("email_config", {})
+
+        def _on_save(new_cfg: dict):
+            d = self.config_mgr.load()
+            d["email_config"] = new_cfg
+            self.config_mgr.save(d)
+            self.email_svc.update_config(new_cfg)
+            self.log("Configuração de e-mail salva.", "OK")
+
+        EmailConfigForm(self, current_cfg, _on_save)
+
     def _persist_globals(self):
         data = self.config_mgr.load()
         data["auto_sync"]     = self.var_auto.get()
@@ -1199,6 +1416,9 @@ class BackupApp(ctk.CTk):
 
     def _load_all(self):
         data = self.config_mgr.load()
+
+        # Sincroniza config de e-mail com o serviço em memória
+        self.email_svc.update_config(data.get("email_config", {}))
 
         interval = data.get("sync_interval", "1 hora")
         if interval in SyncScheduler.INTERVALS:

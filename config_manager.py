@@ -134,15 +134,16 @@ class ConfigManager:
     def new_profile(self, folder_pai: str = "GR7 BACKUP MANAGER") -> dict:
         """Retorna um perfil vazio com valores padrão."""
         return {
-            "id":         _new_id(),
-            "nome":       "",
-            "modo":       "rotacao",
-            "folder_pai": folder_pai,
-            "cliente":    "",
-            "backup_dir": "",
-            "extensoes":  ".sql",
-            "qtd_backups": 3,
-            "ativo":      True,
+            "id":           _new_id(),
+            "nome":         "",
+            "modo":         "rotacao",
+            "folder_pai":   folder_pai,
+            "cliente":      "",
+            "backup_dir":   "",
+            "extensoes":    ".sql",
+            "qtd_backups":  3,
+            "ativo":        True,
+            "email_alerta": False,
         }
 
     # ── Internal ──────────────────────────────────────────────────────────────
@@ -154,6 +155,14 @@ class ConfigManager:
             "auto_sync":     False,
             "sync_interval": "1 hora",
             "history":       [],
+            "email_config": {
+                "smtp_host":     "",
+                "smtp_port":     587,
+                "smtp_user":     "",
+                "smtp_password": "",
+                "to_addr":       "",
+                "use_tls":       True,
+            },
         }
 
     @staticmethod
