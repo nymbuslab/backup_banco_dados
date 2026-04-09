@@ -30,6 +30,7 @@ converte para o novo formato preservando todos os dados.
 
 import json
 import os
+import socket
 import tempfile
 import threading
 import uuid
@@ -189,6 +190,10 @@ class ConfigManager:
             "auto_sync":     False,
             "sync_interval": "1 hora",
             "history":       [],
+            "installation_id": "inst_" + uuid.uuid4().hex[:10],
+            "installation_label": "",
+            "admin_alerts_enabled": False,
+            "alert_state": {},
             "email_config": {
                 "smtp_host":     "",
                 "smtp_port":     587,
@@ -210,6 +215,13 @@ class ConfigManager:
         defaults = ConfigManager._empty()
         if "profiles" in raw:
             defaults.update(raw)
+            defaults["installation_id"] = str(defaults.get("installation_id") or ("inst_" + uuid.uuid4().hex[:10]))
+            defaults["installation_label"] = ConfigManager._normalize_installation_label(
+                defaults.get("installation_label"),
+                defaults.get("profiles", []),
+            )
+            defaults["admin_alerts_enabled"] = bool(defaults.get("admin_alerts_enabled", False))
+            defaults["alert_state"] = ConfigManager._normalize_alert_state(defaults.get("alert_state"))
             defaults["email_config"] = ConfigManager._normalize_email_config(defaults.get("email_config"))
             ConfigManager._migrate_plaintext_password(defaults["email_config"])
             ConfigManager._inject_secret(defaults["email_config"])
@@ -234,6 +246,12 @@ class ConfigManager:
             "sync_interval": raw.get("sync_interval", "1 hora"),
             "history":       raw.get("history", []),
         })
+        defaults["installation_label"] = ConfigManager._normalize_installation_label(
+            raw.get("installation_label"),
+            defaults.get("profiles", []),
+        )
+        defaults["admin_alerts_enabled"] = bool(raw.get("admin_alerts_enabled", False))
+        defaults["alert_state"] = ConfigManager._normalize_alert_state(raw.get("alert_state"))
         defaults["email_config"] = ConfigManager._normalize_email_config(defaults.get("email_config"))
         ConfigManager._migrate_plaintext_password(defaults["email_config"])
         ConfigManager._inject_secret(defaults["email_config"])
@@ -258,12 +276,51 @@ class ConfigManager:
     @staticmethod
     def _normalize_data(data: dict) -> dict:
         normalized = dict(data)
+        normalized["installation_id"] = str(normalized.get("installation_id") or ("inst_" + uuid.uuid4().hex[:10]))
+        normalized["installation_label"] = ConfigManager._normalize_installation_label(
+            normalized.get("installation_label"),
+            normalized.get("profiles", []),
+        )
+        normalized["admin_alerts_enabled"] = bool(normalized.get("admin_alerts_enabled", False))
+        normalized["alert_state"] = ConfigManager._normalize_alert_state(normalized.get("alert_state"))
         email_cfg = ConfigManager._normalize_email_config(normalized.get("email_config"))
         password = email_cfg.get("smtp_password", "")
         if password:
             ConfigManager._set_smtp_password(password)
         email_cfg["smtp_password"] = ""
         normalized["email_config"] = email_cfg
+        return normalized
+
+    @staticmethod
+    def _normalize_installation_label(label, profiles: list) -> str:
+        text = str(label or "").strip()
+        if text:
+            return text
+        clientes = []
+        for profile in profiles or []:
+            cliente = str(profile.get("cliente", "")).strip()
+            if cliente and cliente not in clientes:
+                clientes.append(cliente)
+        if len(clientes) == 1:
+            return clientes[0]
+        try:
+            return socket.gethostname().strip()
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _normalize_alert_state(alert_state) -> dict:
+        if not isinstance(alert_state, dict):
+            return {}
+        normalized = {}
+        for key, value in alert_state.items():
+            if not isinstance(key, str):
+                continue
+            if isinstance(value, dict):
+                normalized[key] = {
+                    "last_sent_at": str(value.get("last_sent_at", "") or ""),
+                    "last_message": str(value.get("last_message", "") or ""),
+                }
         return normalized
 
     @staticmethod

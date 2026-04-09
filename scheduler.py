@@ -32,10 +32,11 @@ class SyncScheduler:
         "24 horas": 24 * 3600,
     }
 
-    def __init__(self, sync_fn: Callable, log_fn: Callable, cancel_evt=None):
+    def __init__(self, sync_fn: Callable, log_fn: Callable, cancel_evt=None, error_fn: Callable | None = None):
         self._sync          = sync_fn
         self._log           = log_fn
         self._cancel_evt    = cancel_evt
+        self._error_fn      = error_fn
         self._active        = False     # master: sync ligado/desligado
         self._use_interval  = False     # se True usa _interval; se False usa CONTINUOUS
         self._interval      = 3600
@@ -143,3 +144,8 @@ class SyncScheduler:
             self._sync()
         except Exception as e:
             self._log(f"Erro no sync: {e}", "ERROR")
+            if self._error_fn:
+                try:
+                    self._error_fn(str(e))
+                except Exception:
+                    pass

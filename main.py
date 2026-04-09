@@ -11,6 +11,7 @@ from drive_service   import DriveService
 from backup_manager  import BackupManager
 from scheduler       import SyncScheduler
 from email_service   import EmailService
+from alert_service   import AlertService
 import autostart
 
 ctk.set_appearance_mode("dark")
@@ -324,14 +325,15 @@ class ProfileForm(ctk.CTkToplevel):
 class EmailConfigForm(ctk.CTkToplevel):
     """Modal para configurar SMTP de alertas por e-mail."""
 
-    def __init__(self, parent, config: dict, on_save):
+    def __init__(self, parent, config: dict, admin_config: dict, on_save):
         super().__init__(parent)
-        self.config  = dict(config)
+        self.config = dict(config)
+        self.admin_config = dict(admin_config)
         self.on_save = on_save
 
         self.title("Configuração de E-mail")
-        self.geometry("480x520")
-        self.minsize(460, 480)
+        self.geometry("520x680")
+        self.minsize(500, 620)
         self.resizable(True, True)
         self.configure(fg_color=BG_DARK)
         self.grab_set()
@@ -434,9 +436,35 @@ class EmailConfigForm(ctk.CTkToplevel):
                      text="Desative para SSL direto (porta 465).",
                      font=FONT_TINY, text_color=TEXT_SEC
                      ).grid(row=9, column=0, sticky="w", pady=(0, 4))
+
+        ctk.CTkFrame(f, fg_color=BORDER, height=1).grid(
+            row=10, column=0, sticky="ew", pady=(14, 0))
+
+        lbl("Identificação da instalação", 11)
+        self.ent_installation = ent(12, "ex: TESTE GR7 - MATRIZ")
+        ctk.CTkLabel(f,
+                     text="Usado nos e-mails de alertas administrativos para identificar o cliente/máquina.",
+                     font=FONT_TINY, text_color=TEXT_SEC
+                     ).grid(row=13, column=0, sticky="w", pady=(0, 4))
+
+        admin_row = ctk.CTkFrame(f, fg_color="transparent")
+        admin_row.grid(row=14, column=0, sticky="ew", pady=(10, 0))
+        admin_row.columnconfigure(1, weight=1)
+        ctk.CTkLabel(admin_row, text="Alertas administrativos",
+                     font=FONT_SMALL, text_color=TEXT_SEC
+                     ).grid(row=0, column=0, sticky="w")
+        self.var_admin_alerts = tk.BooleanVar(value=False)
+        ctk.CTkSwitch(admin_row, text="", variable=self.var_admin_alerts,
+                      onvalue=True, offvalue=False, width=44,
+                      progress_color=ACCENT
+                      ).grid(row=0, column=1, sticky="e")
+        ctk.CTkLabel(f,
+                     text="Notifica problemas globais da instalação, como reconexão obrigatória do Google Drive.",
+                     font=FONT_TINY, text_color=TEXT_SEC
+                     ).grid(row=15, column=0, sticky="w", pady=(0, 4))
         self.lbl_test_status = ctk.CTkLabel(f, text="",
                                             font=FONT_TINY, text_color=TEXT_SEC)
-        self.lbl_test_status.grid(row=10, column=0, sticky="w", pady=(10, 0))
+        self.lbl_test_status.grid(row=16, column=0, sticky="w", pady=(10, 0))
 
     def _load(self):
         c = self.config
@@ -447,13 +475,16 @@ class EmailConfigForm(ctk.CTkToplevel):
         if c.get("smtp_password"): self.ent_pwd.insert(0, c["smtp_password"])
         if c.get("to_addr"):       self.ent_to.insert(0, c["to_addr"])
         self.var_tls.set(c.get("use_tls", True))
+        if self.admin_config.get("installation_label"):
+            self.ent_installation.insert(0, self.admin_config["installation_label"])
+        self.var_admin_alerts.set(self.admin_config.get("admin_alerts_enabled", False))
 
-    def _collect(self) -> dict:
+    def _collect(self) -> tuple[dict, dict]:
         try:
             port = int(self.ent_port.get().strip() or "587")
         except ValueError:
             port = 587
-        return {
+        email_cfg = {
             "smtp_host":     self.ent_host.get().strip(),
             "smtp_port":     port,
             "smtp_user":     self.ent_user.get().strip(),
@@ -461,9 +492,14 @@ class EmailConfigForm(ctk.CTkToplevel):
             "to_addr":       self.ent_to.get().strip(),
             "use_tls":       self.var_tls.get(),
         }
+        admin_cfg = {
+            "installation_label": self.ent_installation.get().strip(),
+            "admin_alerts_enabled": self.var_admin_alerts.get(),
+        }
+        return email_cfg, admin_cfg
 
     def _test(self):
-        cfg = self._collect()
+        cfg, _ = self._collect()
         if not cfg["smtp_host"] or not cfg["smtp_user"] or not cfg["smtp_password"] or not cfg["to_addr"]:
             messagebox.showwarning("Campos incompletos",
                                    "Preencha todos os campos antes de testar.", parent=self)
@@ -489,8 +525,8 @@ class EmailConfigForm(ctk.CTkToplevel):
         threading.Thread(target=_do, daemon=True).start()
 
     def _save(self):
-        cfg = self._collect()
-        self.on_save(cfg)
+        cfg, admin_cfg = self._collect()
+        self.on_save(cfg, admin_cfg)
         self.destroy()
 
 
@@ -517,12 +553,19 @@ class BackupApp(ctk.CTk):
 
         self.config_mgr = ConfigManager()
         self.drive_svc  = DriveService(self.log)
-        email_cfg = self.config_mgr.load().get("email_config", {})
+        initial_cfg = self.config_mgr.load()
+        email_cfg = initial_cfg.get("email_config", {})
         self.email_svc  = EmailService(email_cfg, self.log)
+        self.alert_svc  = AlertService(self.config_mgr, self.email_svc, self.log)
         self.backup_mgr = BackupManager(self.drive_svc, self.log, self.refresh_history,
                                         email_svc=self.email_svc)
         self._sync_cancel_evt = threading.Event()
-        self.scheduler  = SyncScheduler(self._do_background_sync, self.log, cancel_evt=self._sync_cancel_evt)
+        self.scheduler  = SyncScheduler(
+            self._do_background_sync,
+            self.log,
+            cancel_evt=self._sync_cancel_evt,
+            error_fn=self._notify_scheduler_error,
+        )
 
         self._app_alive       = True   # False após destroy() — protege self.after() de threads em background
         self._sync_lock       = threading.Lock()
@@ -552,6 +595,7 @@ class BackupApp(ctk.CTk):
         self.log_text = None
         self.lbl_status = None
         self.lbl_sched_status = None
+        self.lbl_admin_alerts = None
         self.progress = None
 
         self._build_ui()
@@ -739,6 +783,16 @@ class BackupApp(ctk.CTk):
         ctk.CTkLabel(f, text="Inicia minimizado na bandeja.",
                      font=FONT_TINY, text_color=TEXT_SEC
                      ).grid(row=10, column=0, sticky="w", pady=(2, 8))
+
+        self.lbl_admin_alerts = ctk.CTkLabel(
+            f,
+            text="",
+            font=FONT_TINY,
+            text_color=TEXT_SEC,
+            justify="left",
+            wraplength=320,
+        )
+        self.lbl_admin_alerts.grid(row=11, column=0, sticky="w", pady=(4, 2))
 
     # ── Right panel (log + history) ────────────────────────────────────────────
     def _build_right_panel(self, parent):
@@ -996,7 +1050,16 @@ class BackupApp(ctk.CTk):
                 self.log("Drive desconectado — tentando reconectar...", "WARN")
                 if not self.drive_svc.authenticate():
                     self.log("Reconexão automática falhou.", "ERROR")
+                    drained = self._drain_drive_alerts()
+                    if drained == 0:
+                        self._notify_admin_event(
+                            "drive_auto_reconnect_failed",
+                            "Reconexão automática do Google Drive falhou",
+                            f"Não foi possível reconectar o Google Drive automaticamente durante a sincronização do perfil '{profile.get('nome', '')}'.",
+                            "Abra o aplicativo nessa instalação e reconecte manualmente o Google Drive.",
+                        )
                     return
+                self._drain_drive_alerts()
                 self._drive_connected = True
                 self._safe_after(0, self._on_drive_connected)
 
@@ -1135,10 +1198,12 @@ class BackupApp(ctk.CTk):
     def _do_connect(self):
         ok = self.drive_svc.authenticate()
         if ok:
+            self._drain_drive_alerts()
             self._drive_connected = True
             self._safe_after(0, self._on_drive_connected)
             self.log("Google Drive conectado com sucesso!", "OK")
         else:
+            drained = self._drain_drive_alerts()
             self._drive_connected = False
             self._safe_after(0, lambda: (
                 self.conn_badge.configure(text="● Desconectado", text_color=TEXT_RED),
@@ -1147,6 +1212,13 @@ class BackupApp(ctk.CTk):
                                            text_color=TEXT_SEC)
             ))
             self.log("Falha na autenticação com o Google Drive.", "ERROR")
+            if drained == 0:
+                self._notify_admin_event(
+                    "drive_manual_connect_failed",
+                    "Falha ao conectar o Google Drive",
+                    "A tentativa manual de autenticação do Google Drive falhou.",
+                    "Revise as credenciais e reconecte o Google Drive nessa instalação.",
+                )
 
     def _on_drive_connected(self):
         self.conn_badge.configure(text="● Conectado", text_color=TEXT_GRN)
@@ -1242,7 +1314,16 @@ class BackupApp(ctk.CTk):
                 self.log("Drive desconectado — tentando reconectar...", "WARN")
                 if not self.drive_svc.authenticate():
                     self.log("Reconexão automática falhou.", "ERROR")
+                    drained = self._drain_drive_alerts()
+                    if drained == 0:
+                        self._notify_admin_event(
+                            "drive_auto_reconnect_failed",
+                            "Reconexão automática do Google Drive falhou",
+                            "Não foi possível reconectar o Google Drive automaticamente durante a sincronização agendada.",
+                            "Abra o aplicativo nessa instalação e reconecte manualmente o Google Drive.",
+                        )
                     return
+                self._drain_drive_alerts()
                 self._drive_connected = True
                 self._safe_after(0, self._on_drive_connected)
 
@@ -1399,13 +1480,22 @@ class BackupApp(ctk.CTk):
     def _open_email_config(self):
         data = self.config_mgr.load()
         current_cfg = data.get("email_config", {})
+        admin_cfg = {
+            "installation_label": data.get("installation_label", ""),
+            "admin_alerts_enabled": data.get("admin_alerts_enabled", False),
+        }
 
-        def _on_save(new_cfg: dict):
-            self.config_mgr.update(lambda d: d.__setitem__("email_config", new_cfg))
+        def _on_save(new_cfg: dict, new_admin_cfg: dict):
+            def _update(d: dict):
+                d["email_config"] = new_cfg
+                d["installation_label"] = new_admin_cfg.get("installation_label", "")
+                d["admin_alerts_enabled"] = bool(new_admin_cfg.get("admin_alerts_enabled", False))
+            self.config_mgr.update(_update)
             self.email_svc.update_config(new_cfg)
+            self._refresh_admin_alert_status()
             self.log("Configuração de e-mail salva.", "OK")
 
-        EmailConfigForm(self, current_cfg, _on_save)
+        EmailConfigForm(self, current_cfg, admin_cfg, _on_save)
 
     def _persist_globals(self):
         def _update(data: dict):
@@ -1438,7 +1528,66 @@ class BackupApp(ctk.CTk):
 
         self._render_profiles()
         self.refresh_history(data.get("history", []))
+        self._refresh_admin_alert_status(data)
+        self._drain_drive_alerts()
         self.log("Configuração carregada.", "OK")
+
+    def _drain_drive_alerts(self):
+        count = 0
+        for event in self.drive_svc.pop_pending_alert_events():
+            self.alert_svc.notify_admin_event(event)
+            count += 1
+        return count
+
+    def _notify_admin_event(self, event_code: str, title: str, message: str, action: str):
+        self.alert_svc.notify_admin_event({
+            "event_code": event_code,
+            "title": title,
+            "message": message,
+            "action": action,
+            "occurred_at": datetime.now().strftime("%d/%m/%Y %H:%M"),
+        })
+
+    def _notify_scheduler_error(self, detail: str):
+        self._notify_admin_event(
+            "scheduler_sync_failed",
+            "Falha global na rotina de sincronização",
+            detail,
+            "Revise o aplicativo nessa instalação e o log para identificar a causa da interrupção do sync.",
+        )
+
+    def _refresh_admin_alert_status(self, data: dict | None = None):
+        if self.lbl_admin_alerts is None:
+            return
+        data = data or self.config_mgr.load()
+        enabled = bool(data.get("admin_alerts_enabled", False))
+        installation_label = str(data.get("installation_label", "") or "").strip()
+        inferred_label = ConfigManager._normalize_installation_label(
+            installation_label,
+            data.get("profiles", []),
+        )
+
+        if not enabled:
+            self.lbl_admin_alerts.configure(
+                text="Alertas administrativos desativados.",
+                text_color=TEXT_SEC,
+            )
+            return
+
+        if installation_label:
+            self.lbl_admin_alerts.configure(
+                text=f"Alertas administrativos ativos para: {installation_label}",
+                text_color=TEXT_GRN,
+            )
+            return
+
+        self.lbl_admin_alerts.configure(
+            text=(
+                "Alertas administrativos ativos sem identificação manual da instalação. "
+                f"O envio usará: {inferred_label}. Revise em ✉ E-mail."
+            ),
+            text_color=TEXT_YEL,
+        )
 
     def _get_running_profile_id(self) -> str | None:
         with self._running_profile_lock:

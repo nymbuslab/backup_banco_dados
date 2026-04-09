@@ -1,6 +1,8 @@
 import json
 import os
+import socket
 import time
+from datetime import datetime
 from typing import Callable, Any
 
 from app_paths import app_path
@@ -60,7 +62,23 @@ class DriveService:
         self.log     = log_fn
         self.creds   = None
         self.service: Any = None
+        self._pending_events: list[dict] = []
         self._try_load_token()
+
+    def pop_pending_alert_events(self) -> list[dict]:
+        events = list(self._pending_events)
+        self._pending_events.clear()
+        return events
+
+    def _emit_admin_event(self, event_code: str, title: str, message: str, action: str):
+        self._pending_events.append({
+            "event_code": event_code,
+            "title": title,
+            "message": message,
+            "action": action,
+            "hostname": socket.gethostname(),
+            "occurred_at": datetime.now().strftime("%d/%m/%Y %H:%M"),
+        })
 
     # ── Auth ──────────────────────────────────────────────────────────────────
     def _try_load_token(self):
@@ -77,15 +95,26 @@ class DriveService:
                 self.creds = None
         legacy_token_path = app_path(LEGACY_TOKEN_FILE)
         if self.creds is None and os.path.exists(legacy_token_path):
-            self.log(
-                "Token legado ignorado por segurança. Reconecte o Google Drive para gerar um novo token.",
-                "WARN",
+            msg = "Token legado ignorado por segurança. Reconecte o Google Drive para gerar um novo token."
+            self.log(msg, "WARN")
+            self._emit_admin_event(
+                "drive_legacy_token_detected",
+                "Reconectar Google Drive",
+                msg,
+                "Abra o GR7 Backup Manager nessa instalação e reconecte o Google Drive para gerar um novo token.",
             )
 
     def authenticate(self) -> bool:
         creds_path = app_path(CREDS_FILE)
         if not os.path.exists(creds_path):
-            self.log(f"Arquivo '{CREDS_FILE}' não encontrado em: {creds_path}", "ERROR")
+            msg = f"Arquivo '{CREDS_FILE}' não encontrado em: {creds_path}"
+            self.log(msg, "ERROR")
+            self._emit_admin_event(
+                "drive_credentials_missing",
+                "Credenciais do Google Drive ausentes",
+                msg,
+                "Verifique se o arquivo credentials.json está presente ao lado do aplicativo.",
+            )
             return False
         try:
             from google_auth_oauthlib.flow import InstalledAppFlow
@@ -103,7 +132,14 @@ class DriveService:
             self._build_service()
             return True
         except Exception as e:
-            self.log(f"Erro na autenticação: {e}", "ERROR")
+            msg = f"Erro na autenticação: {e}"
+            self.log(msg, "ERROR")
+            self._emit_admin_event(
+                "drive_auth_failed",
+                "Falha na autenticação do Google Drive",
+                msg,
+                "Abra o aplicativo nessa instalação, revise a autenticação e reconecte o Google Drive.",
+            )
             return False
 
     def _build_service(self):
@@ -111,7 +147,14 @@ class DriveService:
             from googleapiclient.discovery import build
             self.service = build("drive", "v3", credentials=self.creds)
         except Exception as e:
-            self.log(f"Erro ao criar serviço Drive: {e}", "ERROR")
+            msg = f"Erro ao criar serviço Drive: {e}"
+            self.log(msg, "ERROR")
+            self._emit_admin_event(
+                "drive_service_creation_failed",
+                "Falha ao iniciar serviço do Google Drive",
+                msg,
+                "Verifique a autenticação e a conectividade dessa instalação com o Google Drive.",
+            )
             self.service = None
 
     def _save_token(self):
